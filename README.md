@@ -1,5 +1,8 @@
 # pw-mcp-proxy
 
+[![CI](https://github.com/Soyouse/pw-mcp-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/Soyouse/pw-mcp-proxy/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 Multiplexeur MCP **transparent** multi-profil pour [`@playwright/mcp`](https://github.com/microsoft/playwright-mcp).
 Expose **un seul** jeu d'outils (les `browser_*` du backend + `switch_profile` / `current_profile` / `restart_profile`)
 et route vers le profil actif. Chaque profil = un serveur `@playwright/mcp@latest` **isolé** (son propre
