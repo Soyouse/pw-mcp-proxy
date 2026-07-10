@@ -1,0 +1,14 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "Mutation UNIQUEMENT sur les fonctions PURES (decision isolee de l'I/O). L'I/O reelle (spawn/kill/enumeration) est couverte par les tests live/integration, JAMAIS par Stryker (doctrine). Le gate break est un cliquet : ne JAMAIS le baisser.",
+  "packageManager": "npm",
+  "testRunner": "command",
+  "commandRunner": { "command": "node --test tests/pure.test.js" },
+  "mutate": ["src/collision.js", "src/prockill-pure.js", "src/spec.js"],
+  "reporters": ["clear-text", "progress"],
+  "coverageAnalysis": "off",
+  "concurrency": 4,
+  "timeoutMS": 15000,
+  "_ratchet": "break=94 = plancher atteint 2026-07-10 (94.12%). Les survivants restants sont des mutants EQUIVALENTS (fallbacks `|| []` jamais atteints + `if(!wanted.length)` neutralise par .some() sur vide). NE JAMAIS BAISSER ce gate ; le remonter si un refactor tue les equivalents.",
+  "thresholds": { "high": 98, "low": 94, "break": 94 }
+}

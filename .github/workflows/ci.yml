@@ -1,0 +1,52 @@
+name: CI
+
+# Repo PRIVE (2000 min/mois). Suite LEGERE (~15s test, ~80s mutation) => bien sous le seuil "lourd".
+# paths STRICTS (seulement le code/tests) + cancel-in-progress + cache npm => cout par push minimal.
+# La matrice OS est ICI le POINT : elle exerce les branches POSIX (ps, kill -pid, spawn detached)
+# que la machine Windows de dev ne peut pas prouver. C'est la seule vraie preuve cross-OS.
+on:
+  push:
+    branches: [master]
+    paths: ['src/**', 'tests/**', 'package.json', 'package-lock.json', 'stryker.conf.json', '.github/workflows/ci.yml']
+  pull_request:
+    branches: [master]
+    paths: ['src/**', 'tests/**', 'package.json', 'package-lock.json', 'stryker.conf.json', '.github/workflows/ci.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Suite complete sur les DEUX OS => exerce treeKill/listProcesses/detached cote POSIX ET Windows.
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  # Gate mutation sur les fonctions PURES uniquement (OS-agnostiques) => ubuntu seul suffit.
+  # Parallele au job test (aucun `needs:` : le wall = le job le plus long, pas la somme).
+  mutation:
+    name: Gate mutation (Stryker, break=94)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:mut

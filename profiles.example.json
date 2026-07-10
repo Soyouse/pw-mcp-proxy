@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy this file to profiles.json and edit it. Each profile = one isolated Chrome profile (its own cookies/session). userDataDir = an ABSOLUTE path, unique per identity. ntfyUrl (optional) = your own NTFY topic for alerts, e.g. https://ntfy.sh/your-topic (leave empty to disable; PW_MCP_NTFY_URL env overrides too). Nothing is hardcoded — the proxy only invokes the official @playwright/mcp with documented flags (--user-data-dir, --caps).",
+  "defaultProfile": "work",
+  "backend": { "command": "npx", "args": ["-y", "@playwright/mcp@latest"] },
+  "caps": [],
+  "ntfyUrl": "",
+  "profiles": {
+    "work": { "userDataDir": "/absolute/path/to/.pw-profiles/work", "label": "Work account" },
+    "personal": { "userDataDir": "/absolute/path/to/.pw-profiles/personal", "label": "Personal account" }
+  }
+}

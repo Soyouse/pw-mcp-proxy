@@ -1,0 +1,12 @@
+node_modules/
+*.log
+pw-mcp-proxy.log
+.pw-profiles/
+.DS_Store
+.stryker-tmp/
+reports/
+.playwright-mcp/
+# Config utilisateur (perso, jamais versionnée) — copier profiles.example.json → profiles.json
+profiles.json
+# Notes de dev internes (refs perso) — hors package open-source
+BACKLOG.md
