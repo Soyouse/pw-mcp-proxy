@@ -50,3 +50,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test:mut
+
+  # Gates couplage (jscpd cliquet + dependency-cruiser no-circular) — ~30s, par-push OK.
+  coupling:
+    name: Gates couplage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run coupling

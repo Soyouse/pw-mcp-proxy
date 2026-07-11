@@ -12,13 +12,18 @@
     "start": "node src/index.js",
     "test": "node --test",
     "test:pure": "node --test tests/pure.test.js",
-    "test:mut": "stryker run"
+    "test:mut": "stryker run",
+    "dup": "jscpd .",
+    "arch": "depcruise --config .dependency-cruiser.cjs .",
+    "coupling": "npm run dup && npm run arch"
   },
   "engines": {
     "node": ">=20"
   },
   "devDependencies": {
     "@stryker-mutator/core": "^8.7.1",
-    "fast-check": "^3.23.1"
+    "dependency-cruiser": "^18.0.0",
+    "fast-check": "^3.23.1",
+    "jscpd": "^5.0.12"
   }
 }
