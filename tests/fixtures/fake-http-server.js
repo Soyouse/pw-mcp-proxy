@@ -32,6 +32,12 @@ const server = http.createServer((req, res) => {
 // Erreur de handshake TCP (client qui coupe tot) : detruire la socket sans crasher le process.
 server.on('clientError', (_e, socket) => { try { socket.destroy(); } catch {} });
 
+// ⚠️ CROSS-OS : le probe readiness annule la reponse APRES l'avoir recue (res.body.cancel()) => RST une
+// fois la reponse COMPLETE. Cet ECONNRESET est emis sur la SOCKET de connexion, PAS sur req/res ni
+// clientError (deja gere plus haut) => sans CE handler-ci, il remonte en uncaughtException => fixture MORT
+// (reproduit macOS CI 2026-07-13 : fixture ready puis pid mort au reap => faux « reap dead »). On l'IGNORE.
+server.on('connection', (socket) => { socket.on('error', () => {}); });
+
 server.on('error', (e) => {
   // EADDRINUSE (--fail-bind ou course) : on NE devient jamais pret => le superviseur timeout et nous tue.
   process.stderr.write(`fake-http-server bind error: ${e.code}\n`);
