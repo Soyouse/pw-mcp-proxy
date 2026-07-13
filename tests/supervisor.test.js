@@ -95,13 +95,11 @@ test('reap : serveur AVEC heartbeat frais est GARDE', async () => {
   const sup = newSup({ ttl: 60000, clientId: 'live' });
   await sup.ensureServer('vegeta', SPEC);
   const entry = serverEntry(readReg(sup), 'vegeta');
-  const aliveAfterEnsure = isPidAlive(entry.pid); // DIAG : false => false-ready (port squatté par un serveur d'un test précédent)
   sup.registerClient('vegeta'); // heartbeat frais
   await sup.reap();
-  assert.ok(
-    serverEntry(readReg(sup), 'vegeta'),
-    `garde dans le registre [DIAG pid=${entry.pid} port=${entry.port} aliveAfterEnsure=${aliveAfterEnsure} aliveNow=${isPidAlive(entry.pid)}]`
-  );
+  // ⚠️ Si ROUGE ici avec pid mort : le fixture s'est auto-terminé (socket reset du probe non géré = crash).
+  // Cf fake-http-server (handlers d'erreur socket). Le reap ne fait que constater un pid déjà mort.
+  assert.ok(serverEntry(readReg(sup), 'vegeta'), `garde dans le registre (pid=${entry.pid} alive=${isPidAlive(entry.pid)})`);
   assert.equal(isPidAlive(entry.pid), true, 'toujours vivant');
   await sup.unregisterClient('vegeta');
 });
