@@ -13,6 +13,7 @@
     "test": "node --test",
     "test:pure": "node --test tests/pure.test.js",
     "test:mut": "stryker run",
+    "test:spec": "node spec/check.mjs",
     "dup": "jscpd .",
     "arch": "depcruise --config .dependency-cruiser.cjs .",
     "coupling": "npm run dup && npm run arch"

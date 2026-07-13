@@ -8,10 +8,10 @@ name: CI
 on:
   push:
     branches: [master]
-    paths: ['src/**', 'tests/**', 'package.json', 'package-lock.json', 'stryker.conf.json', '.github/workflows/ci.yml']
+    paths: ['src/**', 'tests/**', 'spec/**', 'package.json', 'package-lock.json', 'stryker.conf.json', '.github/workflows/ci.yml']
   pull_request:
     branches: [master]
-    paths: ['src/**', 'tests/**', 'package.json', 'package-lock.json', 'stryker.conf.json', '.github/workflows/ci.yml']
+    paths: ['src/**', 'tests/**', 'spec/**', 'package.json', 'package-lock.json', 'stryker.conf.json', '.github/workflows/ci.yml']
 
 permissions:
   contents: read
@@ -51,6 +51,25 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test:mut
+
+  # Gate VERIF FORMELLE du verrou fichier (TLA+/TLC) — ~5s, OS-agnostique => ubuntu seul.
+  # Prouve l'exclusion mutuelle du protocole de vol de verrou (spec/SupervisorLock.tla, config Fixed)
+  # ET verifie que le negative-check (config Buggy) trouve toujours la violation (spec non creuse).
+  spec:
+    name: Gate verif formelle (TLA+/TLC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Télécharger tla2tools.jar
+        run: curl -sL -o spec/tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+      - run: npm run test:spec
 
   # Gates couplage (jscpd cliquet + dependency-cruiser no-circular) — ~30s, par-push OK.
   coupling:

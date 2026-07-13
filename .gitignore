@@ -10,3 +10,9 @@ reports/
 profiles.json
 # Notes de dev internes (refs perso) — hors package open-source
 BACKLOG.md
+# Vérif formelle TLA+ : jar téléchargé à la demande + artefacts de trace TLC (non versionnés)
+spec/tla2tools.jar
+spec/*_TTrace_*.tla
+spec/*_TTrace_*.bin
+spec/*.st
+spec/states/

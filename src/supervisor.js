@@ -91,27 +91,66 @@ export class Supervisor {
   }
 
   // Verrou fichier spin (wx = echoue si existe). Vol du verrou perime (proxy mort en le tenant).
+  // ⚠️ PROTOCOLE FORMELLEMENT PROUVE — spec/SupervisorLock.tla (config Fixed, verifie par TLC au gate
+  // `npm run test:spec`). CE CODE EST L'ANCRAGE (trace) de la spec ; toute divergence casse la preuve.
+  // Correspondance code <-> actions TLA+ : openSync(wx) reussi = action Open (entree section critique) ;
+  // EEXIST + stat = actions Open(present)/Check ; _tryStealStale = actions Steal* (vol serialise).
   async _lock() {
+    const stealPath = this.lockPath + '.steal'; // meta-verrou serialisant le VOL (spec: variable `meta`)
     for (let i = 0; i < 600; i++) { // ~600*50ms = 30s de patience max
       try {
-        const fd = fs.openSync(this.lockPath, 'wx');
+        const fd = fs.openSync(this.lockPath, 'wx'); // spec: Open, branche lock=NoOwner => section critique
         fs.writeSync(fd, String(process.pid));
         fs.closeSync(fd);
         return;
       } catch (e) {
         if (e.code !== 'EEXIST') throw e;
-        // verrou present : perime ? => on le vole.
+        // verrou present (spec: Open branche lock#NoOwner => Check). Perime ?
+        let stale = false;
         try {
           const st = fs.statSync(this.lockPath);
-          if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
-            fs.unlinkSync(this.lockPath);
-            continue;
-          }
-        } catch { /* disparu entre-temps : on retente */ }
-        await this._delay(50);
+          stale = Date.now() - st.mtimeMs > LOCK_STALE_MS;
+        } catch { /* disparu entre stat : on reboucle direct sur openSync */ continue; }
+        // ⚠️ NE JAMAIS remplacer par un `unlinkSync(this.lockPath)` inconditionnel ici : c'est le BUG
+        // prouve ROUGE par TLC (config Buggy) = deux proxys volent le meme verrou perime, le 2e supprime
+        // le verrou FRAIS que le 1er vient de creer => double section critique => double spawn
+        // @playwright/mcp => « browser is already in use ». Le vol DOIT passer par _tryStealStale.
+        if (stale) { if (!this._tryStealStale(stealPath)) await this._delay(50); }
+        else await this._delay(50);
       }
     }
     throw new Error('registry lock: timeout (verrou tenu trop longtemps)');
+  }
+
+  // Vol d'un verrou PERIME, SERIALISE par un meta-verrou + RE-VERIFICATION de la peremption SOUS ce verrou.
+  // ⚠️ INVARIANT DE SURETE (prouve par TLC — spec/SupervisorLock.tla, config Fixed) : le unlink du verrou
+  // principal est re-verifie sous le meta-verrou. Un verrou FRAIS ne pouvant naitre (openSync wx) que si le
+  // path est ABSENT, tant que le perime est present aucun frais n'apparait => ce unlink ne peut JAMAIS
+  // supprimer un verrou frais. Le meta ne protege QU'un re-check+unlink (il n'entre JAMAIS en section
+  // critique, ne cree JAMAIS le verrou principal) => un meta orphelin est un probleme de VIVACITE seul,
+  // jamais de surete ; on le libere au-dela de LOCK_STALE_MS. Retourne true si on a fait un tour de vol
+  // (le caller reboucle sans delai), false si le meta est occupe (le caller temporise).
+  _tryStealStale(stealPath) {
+    let fd;
+    try {
+      fd = fs.openSync(stealPath, 'wx'); // spec: StealAcquireMeta (meta=NoOwner => meta:=moi)
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      // spec: StealWaitMeta (meta occupe). Meta orphelin (voleur mort) => on le recupere (vivacite).
+      try {
+        const st = fs.statSync(stealPath);
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) { try { fs.unlinkSync(stealPath); } catch {} }
+      } catch { /* meta disparu entre-temps */ }
+      return false; // occupe : le caller temporise
+    }
+    try {
+      fs.closeSync(fd);
+      // spec: StealDo — RE-VERIF sous meta : unlink UNIQUEMENT si TOUJOURS present ET TOUJOURS perime.
+      const st = fs.statSync(this.lockPath);
+      if (Date.now() - st.mtimeMs > LOCK_STALE_MS) fs.unlinkSync(this.lockPath);
+    } catch { /* verrou principal deja disparu ou frais : rien a voler */ }
+    finally { try { fs.unlinkSync(stealPath); } catch {} } // relache le meta (spec: meta:=NoOwner)
+    return true;
   }
   _unlock() {
     try { fs.unlinkSync(this.lockPath); } catch { /* deja libere */ }

@@ -81,6 +81,22 @@ test('ensureServer concurrent (2 proxys en parallele) => UN SEUL serveur', async
   assert.ok(entry && isPidAlive(entry.pid));
 });
 
+test('verrou PERIME + 2 proxys concurrents => vol serialise, UN SEUL serveur', async () => {
+  // Ancrage empirique (trace) du protocole prouve par spec/SupervisorLock.tla (config Fixed) :
+  // on seme un verrou PERIME (proxy mort en le tenant), puis 2 proxys foncent en meme temps.
+  // Le vol serialise (meta-verrou + re-verif) DOIT garantir UN SEUL serveur (pas de double spawn).
+  const a = newSup({ clientId: 'A' });
+  const b = newSup({ clientId: 'B' });
+  fs.writeFileSync(a.lockPath, '999999'); // pid bidon d'un "proxy mort" tenant le verrou
+  const old = Date.now() / 1000 - 120; // mtime vieux de 120s > LOCK_STALE_MS (60s) => perime
+  fs.utimesSync(a.lockPath, old, old);
+  const [u1, u2] = await Promise.all([a.ensureServer('perso', SPEC), b.ensureServer('perso', SPEC)]);
+  assert.equal(u1, u2, 'verrou perime vole SANS course : une seule URL');
+  const entry = serverEntry(readReg(a), 'perso');
+  assert.ok(entry && isPidAlive(entry.pid), 'un seul serveur vivant enregistre');
+  assert.equal(fs.existsSync(a.lockPath), false, 'verrou relache a la fin (perime vole puis libere)');
+});
+
 test('reap : serveur SANS client vivant (ttl court) est tue et retire', async () => {
   const sup = newSup({ ttl: 1, clientId: 'solo' }); // ttl=1ms => idle immediat
   await sup.ensureServer('vegeta', SPEC);
