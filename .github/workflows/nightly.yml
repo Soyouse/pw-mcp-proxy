@@ -1,0 +1,41 @@
+name: Nightly (contract-live)
+
+# Drift-test LIVE contre le VRAI @playwright/mcp (télécharge Chromium => LOURD). Prouve en continu que
+# le proxy reste « increvable aux updates Microsoft » : handshake HTTP réel + multi-agent (2 agents
+# adoptent 1 serveur partagé) + profil persistant --shared-browser-context (tests/contract-live.test.js).
+# ⚠️ JAMAIS par-push (coût Chromium) : schedule nocturne + déclenchable à la main. Repo PUBLIC => illimité.
+# Sert de gate d'adoption pour un bump @playwright/mcp (PR Renovate => ce job DOIT être vert avant merge).
+on:
+  schedule:
+    - cron: '0 4 * * *' # 04:00 UTC chaque nuit
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract-live:
+    name: contract-live (vrai @playwright/mcp)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Version PINNÉE = source unique profiles.example.json (jamais un @latest mouvant à l'aveugle).
+      - name: Extraire la version pinnée @playwright/mcp
+        id: ver
+        run: echo "v=$(node -e "console.log(require('./profiles.example.json').backend.args.at(-1).split('@').pop())")" >> "$GITHUB_OUTPUT"
+      - name: Installer Chromium (deps système incluses)
+        run: npx --yes playwright@latest install --with-deps chromium
+      - name: E2E LIVE (multi-agent réel + profil partagé)
+        env:
+          PW_MCP_LIVE: '1'
+          PW_MCP_VERSION: ${{ steps.ver.outputs.v }}
+        run: node --test tests/contract-live.test.js

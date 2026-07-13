@@ -1,0 +1,20 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "_comment": "Surveille le bump de @playwright/mcp PINNÉ dans profiles.example.json (source unique de la version). Une PR de bump DÉCLENCHE le workflow nightly (contract-live, vrai binaire) qui DOIT être vert avant merge = adoption gatée, jamais un @latest à l'aveugle. Requiert l'app Renovate activée sur le repo (gratuit pour repo public).",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": ["^profiles\\.example\\.json$"],
+      "matchStrings": ["@playwright/mcp@(?<currentValue>[0-9][0-9.]*)"],
+      "depNameTemplate": "@playwright/mcp",
+      "datasourceTemplate": "npm"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchPackageNames": ["@playwright/mcp"],
+      "groupName": "playwright-mcp (drift-test contract-live requis avant merge)"
+    }
+  ]
+}
