@@ -94,10 +94,14 @@ test('reap : serveur SANS client vivant (ttl court) est tue et retire', async ()
 test('reap : serveur AVEC heartbeat frais est GARDE', async () => {
   const sup = newSup({ ttl: 60000, clientId: 'live' });
   await sup.ensureServer('vegeta', SPEC);
-  sup.registerClient('vegeta'); // heartbeat frais
   const entry = serverEntry(readReg(sup), 'vegeta');
+  const aliveAfterEnsure = isPidAlive(entry.pid); // DIAG : false => false-ready (port squatté par un serveur d'un test précédent)
+  sup.registerClient('vegeta'); // heartbeat frais
   await sup.reap();
-  assert.ok(serverEntry(readReg(sup), 'vegeta'), 'garde dans le registre');
+  assert.ok(
+    serverEntry(readReg(sup), 'vegeta'),
+    `garde dans le registre [DIAG pid=${entry.pid} port=${entry.port} aliveAfterEnsure=${aliveAfterEnsure} aliveNow=${isPidAlive(entry.pid)}]`
+  );
   assert.equal(isPidAlive(entry.pid), true, 'toujours vivant');
   await sup.unregisterClient('vegeta');
 });
