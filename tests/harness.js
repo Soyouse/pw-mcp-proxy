@@ -51,10 +51,12 @@ export function taggedArgs(args) {
   return [...args, PROC_MARK];
 }
 
-// Retourne les process survivants (hors self) portant NOTRE marqueur.
-function markedSurvivors() {
+// Retourne les process survivants (hors self) portant NOTRE marqueur. Exporté = testable :
+// c'est la DÉTECTION au cœur du ratchet (prouver qu'il VOIT une fuite, pas seulement qu'il tue).
+export function survivors() {
   return listProcesses().filter(({ pid, cmd }) => pid !== process.pid && cmd.includes(PROC_MARK));
 }
+const markedSurvivors = survivors;
 
 // reapAll : tue tout (tracké + tout survivant marqué), best-effort, synchrone. Idempotent.
 export function reapAll() {
