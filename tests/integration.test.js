@@ -5,7 +5,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawnTracked } from './harness.js'; // ⚠️ spawn tracké + ratchet anti-fuite (JAMAIS child_process.spawn nu)
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -85,7 +85,7 @@ async function waitFor(pred, ms = 3000) {
 before(async () => {
   cfgPath = path.join(os.tmpdir(), `pw-mcp-test-${process.pid}.json`);
   writeCfg(baseCfg());
-  proc = spawn(process.execPath, [INDEX], {
+  proc = spawnTracked([INDEX], {
     env: { ...process.env, PW_MCP_PROFILES: cfgPath, PW_MCP_LOG: path.join(os.tmpdir(), `pw-mcp-test-${process.pid}.log`) },
     stdio: ['pipe', 'pipe', 'inherit'],
   });
@@ -102,7 +102,7 @@ before(async () => {
 });
 
 after(() => {
-  try { proc.kill(); } catch {}
+  // Process tué + vérifié par le harnais (spawnTracked -> ratchet). Ici : seulement le fichier temp.
   try { fs.unlinkSync(cfgPath); } catch {}
 });
 

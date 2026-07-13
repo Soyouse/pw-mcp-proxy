@@ -16,6 +16,7 @@ import {
 } from '../src/collision.js';
 import { normPath, selectVictims } from '../src/prockill-pure.js';
 import { buildSpec, DEFAULT_BACKEND } from '../src/spec.js';
+import { resolveShellSpawn } from '../src/spawn-cmd.js';
 
 // ========================= collision.js =========================
 
@@ -178,6 +179,79 @@ test('buildSpec : userDataDir ajoute --user-data-dir <path>', () => {
   const i = s.args.indexOf('--user-data-dir');
   assert.ok(i >= 0);
   assert.equal(s.args[i + 1], 'C:/x/perso');
+});
+
+// resolveShellSpawn : decision de spawn cross-OS (source unique stdio-transport + supervisor).
+test('resolveShellSpawn : Windows + commande bare (npx) => shell:true (sinon le serveur ne demarre pas)', () => {
+  const r = resolveShellSpawn('npx', ['-y', '@playwright/mcp@0.0.78'], 'win32');
+  assert.equal(r.shell, true, 'bare command sur win => shell requis');
+  assert.equal(r.command, 'npx');
+});
+
+test('resolveShellSpawn : Windows + binaire absolu .exe => shell:false', () => {
+  const r = resolveShellSpawn('C:/Program Files/node/node.exe', ['x.js'], 'win32');
+  assert.equal(r.shell, false, '.exe absolu => pas de shell (espace dans le chemin casserait)');
+});
+
+test('resolveShellSpawn : Windows + shell => quote les args a espaces', () => {
+  const r = resolveShellSpawn('npx', ['--user-data-dir', 'C:/mes profils/x'], 'win32');
+  assert.ok(r.args.includes('"C:/mes profils/x"'), 'arg a espace quote pour le shell');
+  assert.ok(r.args.includes('--user-data-dir'), 'arg sans espace non quote');
+});
+
+test('resolveShellSpawn : POSIX => jamais de shell (detached/kill de groupe gere ailleurs)', () => {
+  const r = resolveShellSpawn('npx', ['-y', 'pkg'], 'linux');
+  assert.equal(r.shell, false);
+  assert.deepEqual(r.args, ['-y', 'pkg'], 'args intacts (pas de quoting hors shell)');
+});
+
+test('resolveShellSpawn : Windows + chemin ABSOLU sans extension => shell:false (isAbsolute suffit)', () => {
+  assert.equal(resolveShellSpawn('C:/tools/runner', [], 'win32').shell, false);
+  assert.equal(resolveShellSpawn('C:\\tools\\runner', [], 'win32').shell, false, 'backslash aussi absolu');
+});
+
+test('resolveShellSpawn : Windows + RELATIF mais .exe/.com => shell:false (isBinary suffit)', () => {
+  assert.equal(resolveShellSpawn('runner.exe', [], 'win32').shell, false, '.exe relatif = binaire');
+  assert.equal(resolveShellSpawn('runner.COM', [], 'win32').shell, false, '.com insensible a la casse');
+});
+
+test('resolveShellSpawn : Windows + chemin POSIX-absolu (/usr/bin) => shell:false', () => {
+  assert.equal(resolveShellSpawn('/usr/bin/node', [], 'win32').shell, false, 'slash de tete = absolu');
+});
+
+test('buildSpec : isolated ajoute --isolated (et EXCLUT --user-data-dir)', () => {
+  const s = buildSpec('anon', { isolated: true, userDataDir: 'C:/ignore' }, {});
+  assert.ok(s.args.includes('--isolated'), 'flag --isolated present');
+  assert.ok(!s.args.includes('--user-data-dir'), 'isolated l emporte : pas de --user-data-dir');
+});
+
+test('buildSpec : sans isolated, userDataDir seul => --user-data-dir (pas --isolated)', () => {
+  const s = buildSpec('p', { userDataDir: 'C:/x' }, {});
+  assert.ok(!s.args.includes('--isolated'));
+  assert.ok(s.args.includes('--user-data-dir'));
+});
+
+test('buildSpec : HTTP + persistant => --shared-browser-context (multi-agent, contrat documente)', () => {
+  const s = buildSpec('vegeta', { userDataDir: 'C:/x' }, {}, { http: true });
+  assert.ok(s.args.includes('--shared-browser-context'), 'persistant multi-client partage le contexte');
+  assert.ok(s.args.includes('--user-data-dir'));
+});
+
+test('buildSpec : HTTP + isolated => PAS de --shared-browser-context (deja parallele)', () => {
+  const s = buildSpec('anon', { isolated: true }, {}, { http: true });
+  assert.ok(!s.args.includes('--shared-browser-context'));
+  assert.ok(s.args.includes('--isolated'));
+});
+
+test('buildSpec : stdio (pas http) + persistant => PAS de --shared-browser-context (client unique)', () => {
+  const s = buildSpec('p', { userDataDir: 'C:/x' }, {}, { http: false });
+  assert.ok(!s.args.includes('--shared-browser-context'));
+});
+
+test('buildSpec : http sans profil courant (opts.http mais isolated) n injecte pas shared-context', () => {
+  // garde-fou : --shared-browser-context UNIQUEMENT sur la branche userDataDir, jamais isolated
+  const s = buildSpec('anon', { isolated: true, userDataDir: 'C:/ignore' }, {}, { http: true });
+  assert.ok(!s.args.includes('--shared-browser-context'), 'isolated l emporte, pas de shared-context');
 });
 
 test('buildSpec : args libres du profil ajoutes en fin', () => {

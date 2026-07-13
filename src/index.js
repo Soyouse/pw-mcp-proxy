@@ -10,8 +10,6 @@ import { NdjsonReader } from './jsonrpc.js';
 import { initLogger, log } from './logger.js';
 import { Manager } from './manager.js';
 import { Router } from './router.js';
-import { sweepByCmd } from './prockill.js';
-import { acquireSingleInstanceLock } from './lock.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
@@ -25,38 +23,22 @@ process.on('uncaughtException', (e) => log('uncaughtException: ' + (e?.stack || 
 process.on('unhandledRejection', (e) => log('unhandledRejection: ' + (e?.stack || e)));
 
 const manager = new Manager(configPath);
-
-// BOOT-SWEEP self-healing (fix leak P0) : un proxy neuf n'a encore RIEN spawne, donc tout
-// process tenant un de nos --user-data-dir est un ORPHELIN d'un proxy precedent (SIGKILL par
-// le superviseur MCP => cleanup jamais execute => backends+Chrome survivants qui gardent le lock).
-// On les tue avant de servir => plus jamais de "Browser is already in use" au demarrage.
-// ⚠️ Sweep par user-data-dir UNIQUEMENT (jamais le Chrome perso). needles vide (aucun profil
-// avec userDataDir, ex: tests a faux backends) => no-op, aucune enumeration.
-try {
-  const killed = sweepByCmd(manager.userDataDirs());
-  if (killed.length) log(`boot-sweep: ${killed.length} orphelin(s) tue(s) [${killed.join(',')}]`);
-} catch (e) {
-  log('boot-sweep erreur (ignoree): ' + (e?.message || e));
-}
-
 const router = new Router(manager, process.stdout, pkg.version);
 
-// LOCK single-instance COOPERATIF (cf lock.js) : acquis APRES le boot-sweep (on reclame d'abord la
-// ressource navigateur, puis on revendique le lock, ce qui signale aux anciens proxys d'abdiquer).
-// Si un proxy plus recent reprend le lock => on s'arrete proprement (zero zombie). Complementaire
-// du boot-sweep (coop vs forceful = defense en profondeur contre un client MCP qui n'arrete pas
-// l'ancien proxy comme la spec l'exige).
-const lock = acquireSingleInstanceLock(configPath, () => {
-  manager.stopAll();
-  process.exit(0);
-});
+// MULTI-AGENT : PLUS de lock d'abdication ni de boot-sweep global (ils tueraient le serveur partage
+// qu'un AUTRE agent utilise / feraient abdiquer un proxy vivant). La coordination inter-proxys passe
+// desormais par le SUPERVISEUR (serveurs @playwright/mcp HTTP partages, ref-comptes ; cf supervisor.js).
+// bootSupervision() = boot-reap (purge les serveurs morts/idle d'anciennes sessions) + reaper periodique
+// (dead-man). No-op en mode stdio pur. NE PAS reintroduire de lock/boot-sweep global (regression P0-inverse
+// = casse le multi-agent). Le self-heal d'orphelin est CIBLE dans supervisor.ensureServer.
+await manager.bootSupervision();
 
 let stopping = false;
-function shutdown(reason) {
+async function shutdown(reason) {
   if (stopping) return;
   stopping = true;
   log(reason);
-  lock.release();
+  try { await manager.stopSupervision(); } catch {} // retire mes heartbeats (ref-count), ne tue aucun serveur partage
   manager.stopAll();
   process.exit(0);
 }

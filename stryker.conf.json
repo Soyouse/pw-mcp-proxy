@@ -3,12 +3,12 @@
   "_comment": "Mutation UNIQUEMENT sur les fonctions PURES (decision isolee de l'I/O). L'I/O reelle (spawn/kill/enumeration) est couverte par les tests live/integration, JAMAIS par Stryker (doctrine). Le gate break est un cliquet : ne JAMAIS le baisser.",
   "packageManager": "npm",
   "testRunner": "command",
-  "commandRunner": { "command": "node --test tests/pure.test.js" },
-  "mutate": ["src/collision.js", "src/prockill-pure.js", "src/spec.js"],
+  "commandRunner": { "command": "node --test tests/pure.test.js tests/server-registry.test.js tests/sse-parse.test.js" },
+  "mutate": ["src/collision.js", "src/prockill-pure.js", "src/spec.js", "src/server-registry.js", "src/sse-parse.js", "src/spawn-cmd.js"],
   "reporters": ["clear-text", "progress"],
   "coverageAnalysis": "off",
   "concurrency": 4,
   "timeoutMS": 15000,
-  "_ratchet": "break=94 = plancher atteint 2026-07-10 (94.12%). Les survivants restants sont des mutants EQUIVALENTS (fallbacks `|| []` jamais atteints + `if(!wanted.length)` neutralise par .some() sur vide). NE JAMAIS BAISSER ce gate ; le remonter si un refactor tue les equivalents.",
+  "_ratchet": "break=94 = plancher tenu 2026-07-13 (94.48% avec 6 modules purs). Les ~19 survivants restants sont des mutants EQUIVALENTS documentes : collision/prockill (fallbacks `|| []`) ; server-registry L40:14 (valeur non-numerique ajoutee a un Set de ports = jamais de collision) + boucle de sonde (i<=span/i-- : le port avance => pas de boucle infinie, ecart seulement a saturation irrealiste) ; sse-parse (String(block ?? '') + gardes ligne-vide/commentaire neutralisees par le `default:` du switch) ; spawn-cmd (classe de caracteres du regex isAbsolute + forme de l'objet retourne = equivalents). NE JAMAIS BAISSER ce gate ; le remonter si un refactor tue des equivalents.",
   "thresholds": { "high": 98, "low": 94, "break": 94 }
 }

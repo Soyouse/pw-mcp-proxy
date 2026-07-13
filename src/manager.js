@@ -7,6 +7,9 @@
 import fs from 'node:fs';
 import process from 'node:process';
 import { Backend } from './backend.js';
+import { StdioTransport } from './stdio-transport.js';
+import { HttpTransport } from './http-transport.js';
+import { Supervisor } from './supervisor.js';
 import { log } from './logger.js';
 import { sweepByCmd } from './prockill.js';
 import { buildSpec } from './spec.js';
@@ -26,8 +29,23 @@ export class Manager {
     this.clientInfo = { ...DEFAULT_CLIENT_INFO }; // remplace au handshake Claude
     this.onNewBackend = null; // set par le Router (wiring des events)
     this.onConfigChange = null; // set par le Router (re-emet tools/list_changed)
+    this.supervisor = null; // lazy : cree au 1er profil HTTP (mode stdio pur => jamais instancie)
     this._loadConfig();
     this._watch();
+  }
+
+  // Un profil est en mode HTTP (serveur @playwright/mcp partage ref-compte, MULTI-AGENT) si son
+  // flag `http` OU le flag global `http` est vrai. Defaut = stdio (retro-compatible : profils/tests
+  // existants inchanges). C'est le point de bascule expand/contract : les deux transports coexistent.
+  _isHttp(profile) {
+    const p = this.config.profiles[profile] || {};
+    return p.http !== undefined ? !!p.http : !!this.config.http;
+  }
+
+  _sup() {
+    // ntfyUrl config-first (comme le Router/notify) : dead-man des serveurs partages (mort inattendue).
+    if (!this.supervisor) this.supervisor = new Supervisor(this.configPath, { ntfyUrl: this.config.ntfyUrl });
+    return this.supervisor;
   }
 
   _loadConfig() {
@@ -63,6 +81,7 @@ export class Manager {
       if (!this.config.profiles[name]) {
         b.stop();
         this.backends.delete(name);
+        this.supervisor?.unregisterClient(name); // http : je ne suis plus client de ce profil (ref-count)
         continue;
       }
       const newSpec = this._spec(name);
@@ -81,9 +100,10 @@ export class Manager {
     }
   }
 
-  // Delegue a buildSpec (pur, mutation-teste). Le manager ne fait que fournir la config.
+  // Delegue a buildSpec (pur, mutation-teste). Le manager fournit la config + le flag http (qui decide
+  // --shared-browser-context pour un profil persistant multi-agent, cf spec.js / doc @playwright/mcp).
   _spec(profile) {
-    return buildSpec(profile, this.config.profiles[profile], this.config);
+    return buildSpec(profile, this.config.profiles[profile], this.config, { http: this._isHttp(profile) });
   }
 
   async get(profile) {
@@ -91,12 +111,26 @@ export class Manager {
     let b = this.backends.get(profile);
     if (b && b.ready) return b;
     if (!b) {
-      b = new Backend(profile, this._spec(profile));
+      const transport = await this._makeTransport(profile);
+      b = new Backend(profile, transport);
       this.backends.set(profile, b);
       if (this.onNewBackend) this.onNewBackend(b); // wiring AVANT tout message
     }
     await b.start(this.clientInfo);
     return b;
+  }
+
+  // Fabrique le transport d'un profil. Mode HTTP (MULTI-AGENT) : le superviseur GARANTIT le serveur
+  // partage (spawn/adopt) AVANT d'injecter un HttpTransport client + enregistre CE proxy (ref-count).
+  // Mode stdio (defaut) : child MCP prive au proxy (tests, backends custom). userDataDir passe au
+  // superviseur pour le self-heal d'un orphelin (cf supervisor.ensureServer).
+  async _makeTransport(profile) {
+    const spec = this._spec(profile);
+    if (!this._isHttp(profile)) return new StdioTransport(profile, spec);
+    const cfg = this.config.profiles[profile] || {};
+    const url = await this._sup().ensureServer(profile, spec, { userDataDir: cfg.userDataDir });
+    this._sup().registerClient(profile);
+    return new HttpTransport(url, { protocolVersion: this.clientInfo.protocolVersion, spec });
   }
 
   active() {
@@ -135,5 +169,27 @@ export class Manager {
   stopAll() {
     for (const b of this.backends.values()) b.stop();
     this.backends.clear();
+  }
+
+  // Au moins un profil en mode HTTP (=> supervision de serveurs partages requise) ?
+  _anyHttp() {
+    return Object.keys(this.config.profiles).some((p) => this._isHttp(p));
+  }
+
+  // Boot du multi-agent (HTTP) : boot-reap (purge les serveurs d'anciennes sessions morts/idle) puis
+  // demarre le reaper periodique (dead-man des serveurs partages). No-op en mode stdio pur.
+  // REMPLACE l'ancien boot-sweep global + lock d'abdication (incompatibles avec le serveur partage :
+  // ils tueraient le serveur qu'un AUTRE agent utilise / feraient abdiquer un proxy vivant).
+  async bootSupervision() {
+    if (!this._anyHttp()) return;
+    const s = this._sup();
+    await s.reap();
+    s.startReaper();
+  }
+
+  // Arret propre de CE proxy : retire mes heartbeats + stoppe le reaper. NE tue AUCUN serveur partage
+  // (d'autres agents peuvent l'utiliser) — le reaper s'en charge s'il devient orphelin.
+  async stopSupervision() {
+    if (this.supervisor) await this.supervisor.shutdown();
   }
 }

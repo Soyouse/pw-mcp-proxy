@@ -1,30 +1,33 @@
-// Un Backend = un serveur MCP enfant (ex: @playwright/mcp@latest) lie a UN profil isole.
-// Le proxy est CLIENT de ce backend. Bidirectionnel : le backend peut aussi
-// envoyer des requetes (server->client) qui remontent jusqu'a Claude.
+// Un Backend = un serveur MCP distant lie a UN profil isole. Le proxy en est CLIENT.
+// Bidirectionnel : le backend peut aussi envoyer des requetes (server->client) qui remontent a Claude.
 //
-// ⚠️ NE JAMAIS hardcoder ni filtrer la liste de tools ici. Le backend est une boite
-// noire : on relaie. C'est ce qui rend le proxy increvable face aux updates Microsoft.
+// Backend est AGNOSTIQUE au transport : il recoit un `transport` (StdioTransport ou HttpTransport)
+// exposant start()/send(msg)/close() + events 'message'|'exit'|'error'. Toute la logique PROTOCOLAIRE
+// (handshake, mapping d'ids, forward) vit ICI ; le transport ne fait que convoyer des messages bruts.
+//
+// ⚠️ NE JAMAIS hardcoder ni filtrer la liste de tools ici. Le backend est une boite noire : on relaie.
+// C'est ce qui rend le proxy increvable face aux updates Microsoft.
 
-import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import path from 'node:path';
-import process from 'node:process';
-import { NdjsonReader, writeMessage } from './jsonrpc.js';
 import { log } from './logger.js';
-import { treeKill } from './prockill.js';
 
 export class Backend extends EventEmitter {
-  constructor(profile, spec) {
+  constructor(profile, transport) {
     super();
     this.profile = profile; // nom du profil
-    this.spec = spec; // { command, args, label }
-    this.child = null;
+    this.transport = transport; // StdioTransport | HttpTransport
     this.ready = false;
     this.initResult = null; // resultat initialize du backend (capabilities/serverInfo/protocolVersion)
     this._idCounter = 0;
     this._internal = new Map(); // id -> {resolve,reject}  (requetes internes du proxy : initialize, tools/list)
     this._forward = new Map(); // backendId -> clientId    (requetes Claude->backend en vol)
     this._startPromise = null;
+    this._exited = false;
+  }
+
+  // spec lue par le Manager (_reconcile compare spec.args) : portee par le transport.
+  get spec() {
+    return this.transport.spec;
   }
 
   _nextId() {
@@ -38,40 +41,16 @@ export class Backend extends EventEmitter {
   }
 
   async _doStart(clientInfo) {
-    const onWin = process.platform === 'win32';
-    // ⚠️ shell:true UNIQUEMENT pour une commande bare type `npx` (resolue en npx.cmd via PATHEXT).
-    // Un binaire absolu (.exe) se spawn SANS shell, sinon un espace dans le chemin
-    // ("C:\Program Files\...") casse tout. Detection chirurgicale, NE PAS remettre shell:onWin.
-    const needsShell = onWin && !path.isAbsolute(this.spec.command) && !/\.(exe|com)$/i.test(this.spec.command);
-    let command = this.spec.command;
-    let args = this.spec.args;
-    if (needsShell) {
-      // cmd.exe : on quote ce qui contient un espace
-      command = /\s/.test(command) ? `"${command}"` : command;
-      args = args.map((a) => (/\s/.test(a) ? `"${a}"` : a));
-    }
-    this.child = spawn(command, args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      shell: needsShell,
-      windowsHide: true,
-      // POSIX : propre groupe de process (pgid = pid) => treeKill(-pid) tue Chrome (petit-enfant).
-      // Windows : inutile, taskkill /T gere l'arbre ; detached y ouvrirait une console.
-      detached: !onWin,
+    // Wiring des events du transport AVANT de demarrer (aucun message perdu).
+    this.transport.on('message', (m) => this._onMessage(m));
+    this.transport.on('exit', (code, sig) => this._onExit(code, sig));
+    this.transport.on('close', () => this._onExit(null, 'close'));
+    this.transport.on('error', (e) => {
+      log(`[backend:${this.profile}] transport error: ${e?.message || e}`);
+      this._onExit(-1, 'error');
     });
 
-    this.child.on('error', (e) => {
-      log(`[backend:${this.profile}] spawn error: ${e.message}`);
-    });
-
-    this.reader = new NdjsonReader(this.child.stdout);
-    this.reader.on('message', (m) => this._onMessage(m));
-    this.reader.on('parse_error', (e, line) =>
-      log(`[backend:${this.profile}] bad json from backend: ${line.slice(0, 200)}`)
-    );
-
-    this.child.stderr.setEncoding('utf8');
-    this.child.stderr.on('data', (d) => log(`[backend:${this.profile}] ${String(d).trimEnd()}`));
-    this.child.on('exit', (code, sig) => this._onExit(code, sig));
+    await this.transport.start();
 
     // Handshake MCP : le proxy initialise le backend avec les capacites NEGOCIEES par Claude.
     const initRes = await this._request('initialize', {
@@ -120,11 +99,7 @@ export class Backend extends EventEmitter {
   }
 
   _write(msg) {
-    if (!this.child || !this.child.stdin.writable) {
-      log(`[backend:${this.profile}] write on dead backend dropped (${msg.method || 'resp'})`);
-      return;
-    }
-    writeMessage(this.child.stdin, msg);
+    this.transport.send(msg);
   }
 
   _onMessage(m) {
@@ -158,6 +133,8 @@ export class Backend extends EventEmitter {
   }
 
   _onExit(code, sig) {
+    if (this._exited) return; // idempotent : http peut emettre error PUIS close
+    this._exited = true;
     const wasReady = this.ready;
     this.ready = false;
     this._startPromise = null;
@@ -178,17 +155,7 @@ export class Backend extends EventEmitter {
   }
 
   stop() {
-    const pid = this.child?.pid;
-    if (this.child) {
-      try {
-        this.child.kill();
-      } catch {}
-      this.child = null;
-    }
-    // ⚠️ OBLIGATOIRE : tuer l'ARBRE. child.kill() ci-dessus ne touche que npx (parent direct) ;
-    // le petit-enfant chrome.exe survivrait et garderait le lock --user-data-dir (leak P0,
-    // "Browser is already in use"). treeKill = taskkill /T (Win) / kill du groupe (POSIX).
-    if (pid) treeKill(pid);
+    try { this.transport.close(); } catch {}
     this.ready = false;
     this._startPromise = null;
   }

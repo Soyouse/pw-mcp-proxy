@@ -1,11 +1,13 @@
 {
-  "_comment": "Copy this file to profiles.json and edit it. Each profile = one isolated Chrome profile (its own cookies/session). userDataDir = an ABSOLUTE path, unique per identity. ntfyUrl (optional) = your own NTFY topic for alerts, e.g. https://ntfy.sh/your-topic (leave empty to disable; PW_MCP_NTFY_URL env overrides too). Nothing is hardcoded — the proxy only invokes the official @playwright/mcp with documented flags (--user-data-dir, --caps).",
+  "_comment": "Copy to profiles.json and edit. http:true => backend runs as ONE shared @playwright/mcp HTTP server per profile (multi-agent: several MCP clients share it). Omit http (or false) => classic stdio child per proxy. Each profile = one identity: userDataDir (ABSOLUTE, persistent, one browser at a time) OR isolated:true (ephemeral, unlimited parallel sessions). PIN the version (avoid @latest in prod). ntfyUrl (optional) = your NTFY topic for alerts (or PW_MCP_NTFY_URL env). Nothing hardcoded — only official @playwright/mcp documented flags (--user-data-dir/--isolated/--caps; --host/--port added by the supervisor).",
+  "http": true,
   "defaultProfile": "work",
-  "backend": { "command": "npx", "args": ["-y", "@playwright/mcp@latest"] },
+  "backend": { "command": "npx", "args": ["-y", "@playwright/mcp@0.0.78"] },
   "caps": [],
   "ntfyUrl": "",
   "profiles": {
     "work": { "userDataDir": "/absolute/path/to/.pw-profiles/work", "label": "Work account" },
-    "personal": { "userDataDir": "/absolute/path/to/.pw-profiles/personal", "label": "Personal account" }
+    "personal": { "userDataDir": "/absolute/path/to/.pw-profiles/personal", "label": "Personal account" },
+    "anon": { "isolated": true, "label": "Anonymous (ephemeral, no login)" }
   }
 }
