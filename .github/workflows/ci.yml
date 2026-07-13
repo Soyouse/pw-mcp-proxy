@@ -1,9 +1,10 @@
 name: CI
 
-# Repo PRIVE (2000 min/mois). Suite LEGERE (~15s test, ~80s mutation) => bien sous le seuil "lourd".
+# Repo PUBLIC => minutes CI ILLIMITEES (macOS inclus, pas de multiplicateur x10). Suite LEGERE.
 # paths STRICTS (seulement le code/tests) + cancel-in-progress + cache npm => cout par push minimal.
 # La matrice OS est ICI le POINT : elle exerce les branches POSIX (ps, kill -pid, spawn detached)
-# que la machine Windows de dev ne peut pas prouver. C'est la seule vraie preuve cross-OS.
+# que la machine Windows de dev ne peut pas prouver. Linux + macOS (BSD) + Windows = vraie preuve
+# cross-OS sur les 3 familles que l'equipe utilise. NE PAS retirer macOS (ps BSD != ps GNU).
 on:
   push:
     branches: [master]
@@ -27,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
