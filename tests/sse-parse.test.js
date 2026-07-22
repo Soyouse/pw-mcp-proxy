@@ -1,8 +1,7 @@
 // Tests PURS du decodeur SSE (sse-parse.js). Unite + property-based (fast-check).
 // L'invariant central (property) : le decoupage en chunks n'affecte JAMAIS les events extraits.
 
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
+import { test, expect } from 'vitest';
 import fc from 'fast-check';
 import { sseFeed, parseSseBlock } from '../src/sse-parse.js';
 
@@ -24,110 +23,110 @@ function drain(stream, cuts = []) {
 }
 
 test('parseSseBlock : data simple => event message', () => {
-  assert.deepEqual(parseSseBlock('data: hello'), { event: 'message', data: 'hello', id: null, retry: null });
+  expect(parseSseBlock('data: hello')).toEqual({ event: 'message', data: 'hello', id: null, retry: null });
 });
 
 test('parseSseBlock : data multi-lignes concatene par \\n', () => {
-  assert.equal(parseSseBlock('data: a\ndata: b').data, 'a\nb');
+  expect(parseSseBlock('data: a\ndata: b').data).toBe('a\nb');
 });
 
 test('parseSseBlock : event/id/retry captures', () => {
   const ev = parseSseBlock('event: msg\nid: 42\nretry: 3000\ndata: x');
-  assert.deepEqual(ev, { event: 'msg', data: 'x', id: '42', retry: '3000' });
+  expect(ev).toEqual({ event: 'msg', data: 'x', id: '42', retry: '3000' });
 });
 
 test('parseSseBlock : commentaire (: ...) ignore', () => {
-  assert.equal(parseSseBlock(': keep-alive\ndata: y').data, 'y');
+  expect(parseSseBlock(': keep-alive\ndata: y').data).toBe('y');
 });
 
 test('parseSseBlock : un seul espace de tete retire apres :', () => {
   // "data:  x" (deux espaces) => un seul retire => " x"
-  assert.equal(parseSseBlock('data:  x').data, ' x');
+  expect(parseSseBlock('data:  x').data).toBe(' x');
 });
 
 test('parseSseBlock : bloc vide => null', () => {
-  assert.equal(parseSseBlock(''), null);
-  assert.equal(parseSseBlock(': just a comment'), null);
+  expect(parseSseBlock('')).toBe(null);
+  expect(parseSseBlock(': just a comment')).toBe(null);
 });
 
 test('sseFeed : un event complet extrait, rien en attente', () => {
   const r = sseFeed('', 'data: 1\n\n');
-  assert.equal(r.events.length, 1);
-  assert.equal(r.events[0].data, '1');
-  assert.equal(r.pending, '');
+  expect(r.events.length).toBe(1);
+  expect(r.events[0].data).toBe('1');
+  expect(r.pending).toBe('');
 });
 
 test('sseFeed : event incomplet reste en pending', () => {
   const r = sseFeed('', 'data: partiel\n');
-  assert.equal(r.events.length, 0);
-  assert.equal(r.pending, 'data: partiel\n');
+  expect(r.events.length).toBe(0);
+  expect(r.pending).toBe('data: partiel\n');
 });
 
 test('sseFeed : deux events dans un chunk', () => {
   const r = sseFeed('', 'data: a\n\ndata: b\n\n');
-  assert.deepEqual(r.events.map((e) => e.data), ['a', 'b']);
+  expect(r.events.map((e) => e.data)).toEqual(['a', 'b']);
 });
 
 test('sseFeed : CRLF normalise (data: a\\r\\n\\r\\n)', () => {
   const r = sseFeed('', 'data: a\r\n\r\n');
-  assert.equal(r.events.length, 1);
-  assert.equal(r.events[0].data, 'a');
+  expect(r.events.length).toBe(1);
+  expect(r.events[0].data).toBe('a');
 });
 
 test('sseFeed : CRLF coupe entre deux chunks est recolle', () => {
   const a = sseFeed('', 'data: a\r');
   const b = sseFeed(a.pending, '\n\r\n');
-  assert.equal(b.events.length, 1, 'l event est extrait malgre le CRLF a cheval');
-  assert.equal(b.events[0].data, 'a');
+  expect(b.events.length, 'l event est extrait malgre le CRLF a cheval').toBe(1);
+  expect(b.events[0].data).toBe('a');
 });
 
 test('sseFeed : JSON-RPC MCP typique (une reponse)', () => {
   const payload = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { ok: true } });
   const r = sseFeed('', `event: message\nid: s1\ndata: ${payload}\n\n`);
-  assert.equal(JSON.parse(r.events[0].data).result.ok, true);
+  expect(JSON.parse(r.events[0].data).result.ok).toBe(true);
 });
 
 // ---- tueurs de mutants (Stryker) : fallbacks, champs, bornes ----
 test('parseSseBlock : champ nu sans deux-points (c === -1) => valeur vide', () => {
   // "data" sans ":" => field="data", value="" => data=[""] (sawData vrai) => data ""
-  assert.equal(parseSseBlock('data').data, '');
+  expect(parseSseBlock('data').data).toBe('');
 });
 
 test('parseSseBlock : espace de tete unique retire (data: x => "x", pas " x")', () => {
-  assert.equal(parseSseBlock('data: x').data, 'x');
-  assert.equal(parseSseBlock('data:x').data, 'x'); // sans espace : identique
+  expect(parseSseBlock('data: x').data).toBe('x');
+  expect(parseSseBlock('data:x').data).toBe('x'); // sans espace : identique
 });
 
 test('parseSseBlock : id SEUL => non-null (clause id===null)', () => {
-  assert.deepEqual(parseSseBlock('id: 5'), { event: 'message', data: '', id: '5', retry: null });
+  expect(parseSseBlock('id: 5')).toEqual({ event: 'message', data: '', id: '5', retry: null });
 });
 test('parseSseBlock : retry SEUL => non-null (clause retry===null)', () => {
-  assert.deepEqual(parseSseBlock('retry: 900'), { event: 'message', data: '', id: null, retry: '900' });
+  expect(parseSseBlock('retry: 900')).toEqual({ event: 'message', data: '', id: null, retry: '900' });
 });
 test('parseSseBlock : event SEUL => non-null (clause event===null) + valeur portee', () => {
-  assert.deepEqual(parseSseBlock('event: ping'), { event: 'ping', data: '', id: null, retry: null });
+  expect(parseSseBlock('event: ping')).toEqual({ event: 'ping', data: '', id: null, retry: null });
 });
 test('parseSseBlock : data vide explicite (data:) => non-null, event defaut "message"', () => {
-  assert.deepEqual(parseSseBlock('data:'), { event: 'message', data: '', id: null, retry: null });
+  expect(parseSseBlock('data:')).toEqual({ event: 'message', data: '', id: null, retry: null });
 });
 
 test('sseFeed : pending undefined traite comme "" (fallback ?? gauche)', () => {
   const r = sseFeed(undefined, 'data: x\n\n');
-  assert.equal(r.events.length, 1);
-  assert.equal(r.events[0].data, 'x');
-  assert.equal(r.pending, '');
+  expect(r.events.length).toBe(1);
+  expect(r.events[0].data).toBe('x');
+  expect(r.pending).toBe('');
 });
 test('sseFeed : chunk undefined traite comme "" (fallback ?? droite) => pending inchange', () => {
   const r = sseFeed('data: x\n\n', undefined);
-  assert.equal(r.events[0].data, 'x');
-  assert.equal(r.pending, '', 'aucun residu injecte');
+  expect(r.events[0].data).toBe('x');
+  expect(r.pending, 'aucun residu injecte').toBe('');
 });
 
 test('sseFeed : bloc null (commentaire seul) N EST PAS pousse (if(ev))', () => {
   // ":c" => parseSseBlock null ; "data: x" => event. Total = 1 (le null ne doit pas etre pousse).
   const r = sseFeed('', ':c\n\ndata: x\n\n');
-  assert.equal(r.events.length, 1);
-  assert.equal(r.events[0].data, 'x');
+  expect(r.events.length).toBe(1);
+  expect(r.events[0].data).toBe('x');
 });
 
 // ---- PROPERTY : invariant de chunking (le coeur de la robustesse) ----
@@ -137,8 +136,8 @@ test('property : le decoupage en chunks ne change pas les events ni le pending',
     fc.property(fc.string(), fc.array(fc.nat({ max: 500 }), { maxLength: 12 }), (stream, cuts) => {
       const whole = drain(stream, []); // feed en une fois
       const chunked = drain(stream, cuts); // feed decoupe arbitrairement
-      assert.deepEqual(chunked.events, whole.events);
-      assert.equal(chunked.pending, whole.pending);
+      expect(chunked.events).toEqual(whole.events);
+      expect(chunked.pending).toBe(whole.pending);
     }),
     { numRuns: 500 }
   );
@@ -158,7 +157,7 @@ test('property : round-trip — N events data serialises puis parses redonnent l
       const stream = datas.map((d) => `data: ${d}\n\n`).join('');
       const { events } = drain(stream, []);
       // "data: " retire un espace de tete : on compare a la valeur telle qu'encodee
-      assert.deepEqual(events.map((e) => e.data), datas);
+      expect(events.map((e) => e.data)).toEqual(datas);
     })
   );
 });

@@ -12,17 +12,28 @@ import { EventEmitter } from 'node:events';
 import { log } from './logger.js';
 
 export class Backend extends EventEmitter {
-  constructor(profile, transport) {
+  // ⚠️ options.ping* = WATCHDOG DE LIVENESS (garde-fou fails-closed contre le GEL du backend).
+  // Defauts PROD genereux (faux positif quasi impossible) ; override COURT en test uniquement.
+  // Bug scelle 2026-07-22 : un backend @playwright/mcp fige (popup OAuth natif, page qui hang) et
+  // ne renvoie JAMAIS la reponse => l'appel MCP pendait >120s EN SILENCE (agent qui brule des tokens
+  // contre un navigateur mort). Cf memory reference-browser-mcp-freeze-bug + doc scellee.
+  constructor(profile, transport, options = {}) {
     super();
     this.profile = profile; // nom du profil
     this.transport = transport; // StdioTransport | HttpTransport
     this.ready = false;
     this.initResult = null; // resultat initialize du backend (capabilities/serverInfo/protocolVersion)
     this._idCounter = 0;
-    this._internal = new Map(); // id -> {resolve,reject}  (requetes internes du proxy : initialize, tools/list)
+    this._internal = new Map(); // id -> {resolve,reject}  (requetes internes du proxy : initialize, tools/list, ping)
     this._forward = new Map(); // backendId -> clientId    (requetes Claude->backend en vol)
     this._startPromise = null;
     this._exited = false;
+    // Watchdog : n'agit que TANT QU'une requete est en vol (spec MCP utilities/ping : eviter le ping excessif).
+    this._pingIntervalMs = options.pingIntervalMs ?? 15000; // periode entre deux pings quand ca attend
+    this._pingTimeoutMs = options.pingTimeoutMs ?? 10000; // budget de reponse d'UN ping
+    this._maxMissedPings = options.maxMissedPings ?? 3; // pings rates CONSECUTIFS => backend declare fige
+    this._watchdog = null; // handle setInterval (null = inactif)
+    this._missedPings = 0; // compteur de pings rates consecutifs (reset des qu'un ping repond)
   }
 
   // spec lue par le Manager (_reconcile compare spec.args) : portee par le transport.
@@ -86,7 +97,53 @@ export class Backend extends EventEmitter {
   forwardRequest(clientMsg) {
     const id = this._nextId();
     this._forward.set(id, clientMsg.id);
+    this._startWatchdog(); // une requete est en vol => surveiller la vivacite du backend
     this._write({ ...clientMsg, id });
+  }
+
+  // ---------- watchdog de liveness (ping applicatif MCP) ----------
+  // ⚠️ Distingue "backend OCCUPE (action longue legitime)" de "backend FIGE (mort silencieux)".
+  // Le contrat Streamable HTTP n'envoie AUCUN octet pendant une action longue (la reponse arrive a
+  // la FIN) => un timeout d'inactivite tuerait un upload legitime (12 min = normal). SEUL un canal
+  // SEPARE tranche : le `ping` (spec MCP 2025-11-25 utilities/ping, le receveur DOIT repondre {}).
+  // Repond => vivant, on attend ; K pings CONSECUTIFS sans reponse => fige => on coupe (-32000).
+  _startWatchdog() {
+    if (this._watchdog || this._pingIntervalMs <= 0) return; // deja actif, ou desactive (intervalle<=0)
+    this._missedPings = 0;
+    this._watchdog = setInterval(() => { this._pingOnce().catch(() => {}); }, this._pingIntervalMs);
+    this._watchdog.unref?.(); // NE JAMAIS retenir l'event loop du proxy sur le watchdog
+  }
+
+  _stopWatchdog() {
+    if (this._watchdog) { clearInterval(this._watchdog); this._watchdog = null; }
+    this._missedPings = 0;
+  }
+
+  // Un cycle : ping le backend, borne par _pingTimeoutMs. Repond => reset ; timeout => compte ;
+  // seuil atteint => _onExit('unresponsive') (meme chemin qu'un crash => -32000 aux requetes en vol,
+  // recuperable : Claude reprend la main et peut appeler restart_profile).
+  async _pingOnce() {
+    if (this._exited) { this._stopWatchdog(); return; }
+    if (this._forward.size === 0) { this._stopWatchdog(); return; } // plus rien en vol : on arrete de pinger
+    const id = this._nextId();
+    const answered = new Promise((resolve) => {
+      // resolve(true) au retour du ping, resolve(false) si le backend meurt (reject des _internal).
+      this._internal.set(id, { resolve: () => resolve(true), reject: () => resolve(false) });
+      this._write({ jsonrpc: '2.0', id, method: 'ping', params: {} });
+    });
+    const timedOut = new Promise((resolve) => {
+      const h = setTimeout(() => resolve(false), this._pingTimeoutMs);
+      h.unref?.();
+    });
+    const ok = await Promise.race([answered, timedOut]);
+    if (ok) { this._missedPings = 0; return; } // backend vivant (action longue legitime) : on continue d'attendre
+    this._internal.delete(id); // timeout : purge l'entree orpheline (une reponse tardive n'aura personne)
+    if (this._exited) return; // le backend est mort entre-temps (course) : rien a declarer
+    this._missedPings += 1;
+    if (this._missedPings >= this._maxMissedPings) {
+      log(`[backend:${this.profile}] FIGE: ${this._missedPings} pings sans reponse => backend declare mort (unresponsive)`);
+      this._onExit(-1, 'unresponsive'); // renvoie -32000 aux requetes en vol + stoppe le watchdog
+    }
   }
 
   forwardNotification(clientMsg) {
@@ -115,6 +172,7 @@ export class Backend extends EventEmitter {
       if (this._forward.has(m.id)) {
         const clientId = this._forward.get(m.id);
         this._forward.delete(m.id);
+        if (this._forward.size === 0) this._stopWatchdog(); // plus rien en vol => on cesse de pinger
         this.emit('toClient', { ...m, id: clientId });
         return;
       }
@@ -135,6 +193,7 @@ export class Backend extends EventEmitter {
   _onExit(code, sig) {
     if (this._exited) return; // idempotent : http peut emettre error PUIS close
     this._exited = true;
+    this._stopWatchdog(); // le backend est mort/declare mort : plus rien a surveiller
     const wasReady = this.ready;
     this.ready = false;
     this._startPromise = null;
@@ -155,6 +214,7 @@ export class Backend extends EventEmitter {
   }
 
   stop() {
+    this._stopWatchdog(); // ne pas laisser un interval de ping survivre a l'arret du backend
     try { this.transport.close(); } catch {}
     this.ready = false;
     this._startPromise = null;

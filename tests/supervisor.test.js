@@ -2,8 +2,7 @@
 // Prouve le cycle de vie MULTI-AGENT : un serveur partage par profil, adopte par les proxys suivants,
 // garde tant qu'un client bat le coeur, reape (tue) quand plus personne.
 
-import { test, before, after, beforeEach } from 'node:test';
-import assert from 'node:assert/strict';
+import { test, beforeAll, afterAll, beforeEach, expect } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -43,14 +42,14 @@ function readReg(s) {
 let profSeq = 0;
 const prof = () => `sup${process.pid}-${++profSeq}`;
 
-before(() => { cfgPath = path.join(os.tmpdir(), `pw-mcp-sup-${process.pid}.json`); });
+beforeAll(() => { cfgPath = path.join(os.tmpdir(), `pw-mcp-sup-${process.pid}.json`); });
 beforeEach(() => {
   // registre/verrou propres a chaque test (isolation)
   const s = new Supervisor(cfgPath);
   try { fs.unlinkSync(s.registryPath); } catch {}
   try { fs.unlinkSync(s.lockPath); } catch {}
 });
-after(async () => {
+afterAll(async () => {
   // Kill des serveurs DÉTACHÉS + assertion zéro survivant = garantis par le ratchet du harnais
   // (les serveurs portent le marqueur via taggedArgs). Ici : ref-count + fichiers temp seulement.
   for (const s of spawned) { try { await s.shutdown(); } catch {} }
@@ -63,10 +62,10 @@ test('ensureServer : spawn un serveur, il repond, il est enregistre', async () =
   const P = prof();
   const sup = newSup();
   const url = await sup.ensureServer(P, SPEC);
-  assert.match(url, /^http:\/\/localhost:\d+\/mcp$/); // URL client documentee (localhost)
+  expect(url).toMatch(/^http:\/\/localhost:\d+\/mcp$/); // URL client documentee (localhost)
   const entry = serverEntry(readReg(sup), P);
-  assert.ok(entry && isPidAlive(entry.pid), 'pid enregistre et vivant');
-  assert.equal(await sup._probeReady(entry.port), true, 'le serveur repond');
+  expect(entry && isPidAlive(entry.pid), 'pid enregistre et vivant').toBeTruthy();
+  expect(await sup._probeReady(entry.port), 'le serveur repond').toBe(true);
 });
 
 test('ensureServer : 2e appel (autre proxy) ADOPTE le meme serveur (zero 2e spawn)', async () => {
@@ -77,8 +76,8 @@ test('ensureServer : 2e appel (autre proxy) ADOPTE le meme serveur (zero 2e spaw
   const pidA = serverEntry(readReg(a), P).pid;
   const urlB = await b.ensureServer(P, SPEC);
   const pidB = serverEntry(readReg(b), P).pid;
-  assert.equal(urlA, urlB, 'meme URL');
-  assert.equal(pidA, pidB, 'MEME serveur (pid inchange) : adoption, pas de 2e spawn');
+  expect(urlA, 'meme URL').toBe(urlB);
+  expect(pidA, 'MEME serveur (pid inchange) : adoption, pas de 2e spawn').toBe(pidB);
 });
 
 test('ensureServer concurrent (2 proxys en parallele) => UN SEUL serveur', async () => {
@@ -86,9 +85,9 @@ test('ensureServer concurrent (2 proxys en parallele) => UN SEUL serveur', async
   const a = newSup({ clientId: 'A' });
   const b = newSup({ clientId: 'B' });
   const [u1, u2] = await Promise.all([a.ensureServer(P, SPEC), b.ensureServer(P, SPEC)]);
-  assert.equal(u1, u2, 'course serialisee par le verrou : une seule URL');
+  expect(u1, 'course serialisee par le verrou : une seule URL').toBe(u2);
   const entry = serverEntry(readReg(a), P);
-  assert.ok(entry && isPidAlive(entry.pid));
+  expect(entry && isPidAlive(entry.pid)).toBeTruthy();
 });
 
 test('verrou PERIME + 2 proxys concurrents => vol serialise, UN SEUL serveur', async () => {
@@ -102,10 +101,10 @@ test('verrou PERIME + 2 proxys concurrents => vol serialise, UN SEUL serveur', a
   const old = Date.now() / 1000 - 120; // mtime vieux de 120s > LOCK_STALE_MS (60s) => perime
   fs.utimesSync(a.lockPath, old, old);
   const [u1, u2] = await Promise.all([a.ensureServer(P, SPEC), b.ensureServer(P, SPEC)]);
-  assert.equal(u1, u2, 'verrou perime vole SANS course : une seule URL');
+  expect(u1, 'verrou perime vole SANS course : une seule URL').toBe(u2);
   const entry = serverEntry(readReg(a), P);
-  assert.ok(entry && isPidAlive(entry.pid), 'un seul serveur vivant enregistre');
-  assert.equal(fs.existsSync(a.lockPath), false, 'verrou relache a la fin (perime vole puis libere)');
+  expect(entry && isPidAlive(entry.pid), 'un seul serveur vivant enregistre').toBeTruthy();
+  expect(fs.existsSync(a.lockPath), 'verrou relache a la fin (perime vole puis libere)').toBe(false);
 });
 
 test('reap : serveur SANS client vivant (ttl court) est tue et retire', async () => {
@@ -115,8 +114,8 @@ test('reap : serveur SANS client vivant (ttl court) est tue et retire', async ()
   const entry = serverEntry(readReg(sup), P);
   await new Promise((r) => setTimeout(r, 20)); // depasse le ttl
   await sup.reap();
-  assert.equal(serverEntry(readReg(sup), P), null, 'retire du registre');
-  assert.ok(await waitFor(async () => !isPidAlive(entry.pid)), 'process tue (tree-kill)');
+  expect(serverEntry(readReg(sup), P), 'retire du registre').toBe(null);
+  expect(await waitFor(async () => !isPidAlive(entry.pid)), 'process tue (tree-kill)').toBeTruthy();
 });
 
 test('reap : serveur AVEC heartbeat frais est GARDE', async () => {
@@ -128,8 +127,8 @@ test('reap : serveur AVEC heartbeat frais est GARDE', async () => {
   await sup.reap();
   // ⚠️ Si ROUGE ici avec pid mort : le fixture s'est auto-terminé (socket reset du probe non géré = crash).
   // Cf fake-http-server (handlers d'erreur socket). Le reap ne fait que constater un pid déjà mort.
-  assert.ok(serverEntry(readReg(sup), P), `garde dans le registre (pid=${entry.pid} alive=${isPidAlive(entry.pid)})`);
-  assert.equal(isPidAlive(entry.pid), true, 'toujours vivant');
+  expect(serverEntry(readReg(sup), P), `garde dans le registre (pid=${entry.pid} alive=${isPidAlive(entry.pid)})`).toBeTruthy();
+  expect(isPidAlive(entry.pid), 'toujours vivant').toBe(true);
   await sup.unregisterClient(P);
 });
 
@@ -139,7 +138,7 @@ test('boot-reap : entree au pid MORT est purgee', async () => {
   const dead = { servers: { ghost: { port: 9999, pid: 999999, spawnedAt: 0, clients: { x: Date.now() } } } };
   fs.writeFileSync(sup.registryPath, JSON.stringify(dead));
   await sup.reap();
-  assert.equal(serverEntry(readReg(sup), 'ghost'), null, 'entree morte retiree au boot-reap');
+  expect(serverEntry(readReg(sup), 'ghost'), 'entree morte retiree au boot-reap').toBe(null);
 });
 
 test('unregisterClient : retire mon heartbeat du registre', async () => {
@@ -147,7 +146,7 @@ test('unregisterClient : retire mon heartbeat du registre', async () => {
   const sup = newSup({ ttl: 60000, clientId: 'me' });
   await sup.ensureServer(P, SPEC);
   sup.registerClient(P);
-  assert.ok(serverEntry(readReg(sup), P).clients.me, 'enregistre');
+  expect(serverEntry(readReg(sup), P).clients.me, 'enregistre').toBeTruthy();
   await sup.unregisterClient(P);
-  assert.equal(serverEntry(readReg(sup), P).clients.me, undefined, 'retire');
+  expect(serverEntry(readReg(sup), P).clients.me, 'retire').toBeUndefined();
 });

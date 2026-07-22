@@ -38,4 +38,4 @@ jobs:
         env:
           PW_MCP_LIVE: '1'
           PW_MCP_VERSION: ${{ steps.ver.outputs.v }}
-        run: node --test tests/contract-live.test.js
+        run: npx vitest run tests/contract-live.test.js

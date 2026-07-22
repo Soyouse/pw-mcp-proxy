@@ -12,8 +12,7 @@
 // pas de --user-data-dir). Le SEUL obstacle a la coexistence est donc l'abdication du lock =>
 // si les deux proxys survivent et repondent, c'est que le multi-agent est acquis.
 
-import { test, before, after } from 'node:test';
-import assert from 'node:assert/strict';
+import { test, beforeAll, afterAll, expect } from 'vitest';
 import { spawnTracked } from './harness.js'; // ⚠️ spawn tracké + ratchet anti-fuite (JAMAIS child_process.spawn nu)
 import fs from 'node:fs';
 import os from 'node:os';
@@ -88,7 +87,7 @@ async function waitFor(pred, ms = 6000) {
   return false;
 }
 
-before(() => {
+beforeAll(() => {
   cfgPath = path.join(os.tmpdir(), `pw-mcp-multi-${process.pid}.json`);
   // Profil SANS userDataDir => aucun boot-sweep, aucun lock ressource : on teste UNIQUEMENT
   // la coexistence des proxys entre eux (pas la contention navigateur, testee ailleurs).
@@ -99,7 +98,7 @@ before(() => {
   }));
 });
 
-after(() => {
+afterAll(() => {
   // Proxys tués + vérifiés par le harnais (spawnTracked -> ratchet). Ici : seulement le fichier temp.
   try { fs.unlinkSync(cfgPath); } catch {}
 });
@@ -107,7 +106,7 @@ after(() => {
 test('multi-agent : 2 proxys (meme config) coexistent, aucun ne fait abdiquer l autre', async () => {
   const a1 = startAgent('1');
   await handshake(a1);
-  assert.equal(a1.exited, false, 'agent #1 en service apres son boot');
+  expect(a1.exited, 'agent #1 en service apres son boot').toBe(false);
 
   // L'agent #2 demarre (comme une 2e session Claude). Il ne DOIT PAS tuer l'agent #1.
   const a2 = startAgent('2');
@@ -115,8 +114,8 @@ test('multi-agent : 2 proxys (meme config) coexistent, aucun ne fait abdiquer l 
 
   // Laisse le temps a un eventuel mecanisme d'abdication (lock watchFile interval=1000ms) d'agir.
   const abdicated = await waitFor(() => a1.exited, 3500);
-  assert.equal(abdicated, false, 'agent #1 NE DOIT PAS s arreter quand agent #2 demarre (multi-agent)');
-  assert.equal(a2.exited, false, 'agent #2 en service');
+  expect(abdicated, 'agent #1 NE DOIT PAS s arreter quand agent #2 demarre (multi-agent)').toBe(false);
+  expect(a2.exited, 'agent #2 en service').toBe(false);
 });
 
 test('multi-agent : les DEUX proxys servent leurs requetes en parallele', async () => {
@@ -126,11 +125,11 @@ test('multi-agent : les DEUX proxys servent leurs requetes en parallele', async 
     req(a1, 'tools/call', { name: 'echo_A', arguments: { v: 'un' } }),
     req(a2, 'tools/call', { name: 'echo_A', arguments: { v: 'deux' } }),
   ]);
-  assert.equal(r1.content[0].text, 'A:un', 'agent #1 sert sa requete');
-  assert.equal(r2.content[0].text, 'A:deux', 'agent #2 sert sa requete');
+  expect(r1.content[0].text, 'agent #1 sert sa requete').toBe('A:un');
+  expect(r2.content[0].text, 'agent #2 sert sa requete').toBe('A:deux');
 
   // tools/list marche pour les deux (switch_profile injecte de part et d autre).
   const [l1, l2] = await Promise.all([req(a1, 'tools/list', {}), req(a2, 'tools/list', {})]);
-  assert.ok(l1.tools.map((t) => t.name).includes('switch_profile'));
-  assert.ok(l2.tools.map((t) => t.name).includes('switch_profile'));
+  expect(l1.tools.map((t) => t.name).includes('switch_profile')).toBeTruthy();
+  expect(l2.tools.map((t) => t.name).includes('switch_profile')).toBeTruthy();
 });

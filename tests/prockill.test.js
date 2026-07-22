@@ -3,8 +3,7 @@
 // process legitimes de la machine. Chaque test spawn ses propres sleepers avec un marqueur
 // UNIQUE (pid-based) et ne balaie QUE ce marqueur.
 
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
+import { test, expect } from 'vitest';
 import { spawn } from 'node:child_process';
 import { sweepByCmd, isPidAlive, treeKill } from '../src/prockill.js';
 
@@ -34,17 +33,17 @@ test('sweepByCmd tue le process matchant et epargne les autres (self jamais tue)
   const a = sleeper(markA);
   const b = sleeper(markB);
   try {
-    assert.ok(await until(() => a.pid && b.pid), 'les deux sleepers ont un pid');
+    expect(await until(() => a.pid && b.pid), 'les deux sleepers ont un pid').toBeTruthy();
     // laisser la table des process se peupler
     await new Promise((r) => setTimeout(r, 400));
 
     const killed = sweepByCmd([markA]);
-    assert.ok(killed.includes(a.pid), 'A (matchant markA) est balaye');
-    assert.ok(!killed.includes(b.pid), 'B (marqueur different) est epargne');
-    assert.ok(!killed.includes(process.pid), 'le process courant (self) n est jamais balaye');
+    expect(killed.includes(a.pid), 'A (matchant markA) est balaye').toBeTruthy();
+    expect(!killed.includes(b.pid), 'B (marqueur different) est epargne').toBeTruthy();
+    expect(!killed.includes(process.pid), 'le process courant (self) n est jamais balaye').toBeTruthy();
 
-    assert.ok(await until(() => !isPidAlive(a.pid)), 'A est mort');
-    assert.ok(isPidAlive(b.pid), 'B toujours vivant');
+    expect(await until(() => !isPidAlive(a.pid)), 'A est mort').toBeTruthy();
+    expect(isPidAlive(b.pid), 'B toujours vivant').toBeTruthy();
   } finally {
     treeKill(a.pid);
     treeKill(b.pid);
@@ -52,24 +51,24 @@ test('sweepByCmd tue le process matchant et epargne les autres (self jamais tue)
 });
 
 test('sweepByCmd needles vide = no-op (aucune enumeration, rien tue)', () => {
-  assert.deepEqual(sweepByCmd([]), []);
-  assert.deepEqual(sweepByCmd([null, '', undefined]), []);
+  expect(sweepByCmd([])).toEqual([]);
+  expect(sweepByCmd([null, '', undefined])).toEqual([]);
 });
 
 test('treeKill(pid) tue reellement le process', async () => {
   const mark = `PWKILLMARK_${process.pid}_TK`;
   const c = sleeper(mark);
   try {
-    assert.ok(await until(() => !!c.pid));
+    expect(await until(() => !!c.pid)).toBeTruthy();
     treeKill(c.pid);
-    assert.ok(await until(() => !isPidAlive(c.pid)), 'le process est bien mort apres treeKill');
+    expect(await until(() => !isPidAlive(c.pid)), 'le process est bien mort apres treeKill').toBeTruthy();
   } finally {
     treeKill(c.pid);
   }
 });
 
 test('isPidAlive : faux pour un pid inexistant, vrai pour self', () => {
-  assert.equal(isPidAlive(0), false);
-  assert.equal(isPidAlive(2 ** 30), false); // pid quasi certainement libre
-  assert.equal(isPidAlive(process.pid), true);
+  expect(isPidAlive(0)).toBe(false);
+  expect(isPidAlive(2 ** 30)).toBe(false); // pid quasi certainement libre
+  expect(isPidAlive(process.pid)).toBe(true);
 });

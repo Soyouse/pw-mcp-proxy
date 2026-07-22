@@ -4,8 +4,7 @@
 //   - forcer NOTRE tool sous 'proxy_switch_profile' ;
 //   - router l'appel NU vers le backend, et l'appel proxy_ vers nous.
 
-import { test, before, after } from 'node:test';
-import assert from 'node:assert/strict';
+import { test, beforeAll, afterAll, expect } from 'vitest';
 import { spawnTracked } from './harness.js'; // ⚠️ spawn tracké + ratchet anti-fuite (JAMAIS child_process.spawn nu)
 import fs from 'node:fs';
 import os from 'node:os';
@@ -45,7 +44,7 @@ function onMessage(m) {
   if (m.id !== undefined && m.method) send({ jsonrpc: '2.0', id: m.id, result: { roots: [] } });
 }
 
-before(async () => {
+beforeAll(async () => {
   cfgPath = path.join(os.tmpdir(), `pw-mcp-collide-${process.pid}.json`);
   fs.writeFileSync(
     cfgPath,
@@ -74,7 +73,7 @@ before(async () => {
   send({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} });
 });
 
-after(() => {
+afterAll(() => {
   // Process tué + vérifié par le harnais (spawnTracked -> ratchet). Ici : seulement le fichier temp.
   try { fs.unlinkSync(cfgPath); } catch {}
 });
@@ -83,28 +82,27 @@ test('collision : le tool backend garde son nom NU + notre tool passe sous proxy
   const res = await request('tools/list', {});
   const names = res.tools.map((t) => t.name);
   // deux entrees 'switch_profile' : celle du backend (nue) + la notre renommee proxy_
-  assert.ok(names.includes('switch_profile'), 'le switch_profile du BACKEND reste expose (passthrough intact)');
-  assert.ok(names.includes('proxy_switch_profile'), 'NOTRE switch_profile cede la place sous proxy_');
+  expect(names.includes('switch_profile'), 'le switch_profile du BACKEND reste expose (passthrough intact)').toBeTruthy();
+  expect(names.includes('proxy_switch_profile'), 'NOTRE switch_profile cede la place sous proxy_').toBeTruthy();
   // current/restart, pas en collision, gardent leur nom nu
-  assert.ok(names.includes('current_profile'), 'current_profile pas en collision => nom nu');
-  assert.ok(names.includes('restart_profile'), 'restart_profile pas en collision => nom nu');
+  expect(names.includes('current_profile'), 'current_profile pas en collision => nom nu').toBeTruthy();
+  expect(names.includes('restart_profile'), 'restart_profile pas en collision => nom nu').toBeTruthy();
   // le backend qui porte le nom nu switch_profile n'est PAS le notre : sa description vient du fake
   const bareSwitch = res.tools.find((t) => t.name === 'switch_profile');
-  assert.match(bareSwitch.description, /homonyme/, 'le switch_profile nu est bien celui du backend');
+  expect(bareSwitch.description, 'le switch_profile nu est bien celui du backend').toMatch(/homonyme/);
 });
 
 test('collision : appel NU switch_profile => passthrough BACKEND (pas notre handler)', async () => {
   // le fake renvoie une erreur "unknown tool" sur switch_profile (il l'annonce mais ne l'implemente pas) :
   // preuve que l'appel est parti au BACKEND et non intercepte par nous (nous aurions renvoye un succes).
-  await assert.rejects(
-    () => request('tools/call', { name: 'switch_profile', arguments: { profile: 'vegeta' } }),
-    /unknown tool switch_profile/,
+  await expect(
+    request('tools/call', { name: 'switch_profile', arguments: { profile: 'vegeta' } }),
     'l appel nu est bien route vers le backend'
-  );
+  ).rejects.toThrow(/unknown tool switch_profile/);
 });
 
 test('collision : appel proxy_switch_profile => NOTRE handler (succes)', async () => {
   const res = await request('tools/call', { name: 'proxy_switch_profile', arguments: { profile: 'vegeta' } });
-  assert.equal(res.isError, false);
-  assert.match(res.content[0].text, /Profil actif/);
+  expect(res.isError).toBe(false);
+  expect(res.content[0].text).toMatch(/Profil actif/);
 });

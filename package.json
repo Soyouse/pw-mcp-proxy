@@ -10,8 +10,8 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test",
-    "test:pure": "node --test tests/pure.test.js",
+    "test": "vitest run",
+    "test:pure": "vitest run --config vitest.pure.config.js",
     "test:mut": "stryker run",
     "test:spec": "node spec/check.mjs",
     "dup": "jscpd .",
@@ -23,8 +23,10 @@
   },
   "devDependencies": {
     "@stryker-mutator/core": "^8.7.1",
+    "@stryker-mutator/vitest-runner": "^8.7.1",
     "dependency-cruiser": "^18.0.0",
     "fast-check": "^3.23.1",
-    "jscpd": "^5.0.12"
+    "jscpd": "^5.0.12",
+    "vitest": "^3.2.7"
   }
 }

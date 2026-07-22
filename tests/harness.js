@@ -17,7 +17,7 @@
 //    JAMAIS `child_process.spawn` nu dans un test : il échappe au tracker ET au ratchet.
 
 import { spawn } from 'node:child_process';
-import { after } from 'node:test';
+import { afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import process from 'node:process';
 import { treeKill, isPidAlive, listProcesses } from '../src/prockill.js';
@@ -83,8 +83,10 @@ async function reapAndRatchet() {
   );
 }
 
-// UN after root unique par fichier importateur : reap + ratchet garantis, même si un test a throw.
-after(reapAndRatchet);
+// UN afterAll root unique par fichier importateur : reap + ratchet garantis, même si un test a throw.
+// ⚠️ vitest : chaque fichier de test est isolé (pool 'forks', isolate:true) => module state frais
+// par fichier, EXACTEMENT comme node:test (1 process/fichier). afterAll s'attache au fichier COURANT.
+afterAll(reapAndRatchet);
 
 // Filets signaux : crash/kill hors du cycle node:test => on tue au moins les process trackés
 // (best-effort synchrone, pas d'assertion possible ici). Défense en profondeur.

@@ -3,8 +3,7 @@
 // On vérifie les DEUX chemins : (1) process tracké via spawnTracked, (2) process ORPHELIN non tracké
 // mais marqué (simule le serveur détaché spawné par le CODE = la vraie cause de la fuite 9639/9698).
 
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
+import { test, expect } from 'vitest';
 import { spawn } from 'node:child_process';
 import process from 'node:process';
 import { spawnTracked, reapAll, isPidAlive, survivors, PROC_MARK } from './harness.js';
@@ -22,9 +21,9 @@ async function untilDead(pid, ms = 3000) {
 
 test('ratchet : un process TRACKÉ (spawnTracked) est bien tué par reapAll', async () => {
   const child = spawnTracked(SLEEP, { stdio: 'ignore' });
-  assert.ok(isPidAlive(child.pid), 'le sleeper tracké est vivant');
+  expect(isPidAlive(child.pid), 'le sleeper tracké est vivant').toBeTruthy();
   reapAll();
-  assert.ok(await untilDead(child.pid), 'reapAll a tué le process tracké');
+  expect(await untilDead(child.pid), 'reapAll a tué le process tracké').toBeTruthy();
 });
 
 test('ratchet : un ORPHELIN marqué mais NON tracké est retrouvé et tué (scan cmdline)', async () => {
@@ -35,15 +34,15 @@ test('ratchet : un ORPHELIN marqué mais NON tracké est retrouvé et tué (scan
     stdio: 'ignore',
   });
   orphan.unref();
-  assert.ok(await untilAlive(orphan.pid), 'orphelin marqué démarré');
+  expect(await untilAlive(orphan.pid), 'orphelin marqué démarré').toBeTruthy();
   // ROUGE : la DÉTECTION du ratchet VOIT la fuite (sans ça, le gate serait aveugle => zombie silencieux).
-  assert.ok(
+  expect(
     (await untilDetected(orphan.pid)),
     'survivors() détecte l orphelin marqué = le ratchet aurait échoué ROUGE (fuite vue)'
-  );
+  ).toBeTruthy();
   reapAll(); // VERT : doit le retrouver via listProcesses().includes(PROC_MARK) et le tuer
-  assert.ok(await untilDead(orphan.pid), 'le ratchet a tué l orphelin marqué non tracké');
-  assert.equal(survivors().length, 0, 'plus aucun survivant marqué après reap');
+  expect(await untilDead(orphan.pid), 'le ratchet a tué l orphelin marqué non tracké').toBeTruthy();
+  expect(survivors().length, 'plus aucun survivant marqué après reap').toBe(0);
 });
 
 async function untilDetected(pid, ms = 3000) {

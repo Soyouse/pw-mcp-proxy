@@ -11,8 +11,10 @@ import { StdioTransport } from './stdio-transport.js';
 import { HttpTransport } from './http-transport.js';
 import { Supervisor } from './supervisor.js';
 import { log } from './logger.js';
+import { alert } from './notify.js';
 import { sweepByCmd } from './prockill.js';
 import { buildSpec } from './spec.js';
+import { shouldAutoRestart, DEFAULT_MAX_RESTARTS, DEFAULT_WINDOW_MS } from './auto-restart.js';
 
 const DEFAULT_CLIENT_INFO = {
   protocolVersion: '2025-06-18',
@@ -21,7 +23,11 @@ const DEFAULT_CLIENT_INFO = {
 };
 
 export class Manager {
-  constructor(configPath) {
+  // options.watchdog = passe tel quel a `new Backend(...)` (ping*/maxMissedPings, INJECTABLE pour
+  // des tests rapides ; defauts prod = ceux de backend.js si omis).
+  // options.autoRestart = {maxRestarts, windowMs} passe a shouldAutoRestart (garde anti-boucle,
+  // COUCHE 2b) ; defauts prod = auto-restart.js (3 restarts / 5 min) si omis.
+  constructor(configPath, options = {}) {
     this.configPath = configPath;
     this.config = null;
     this.backends = new Map(); // profile -> Backend
@@ -30,6 +36,12 @@ export class Manager {
     this.onNewBackend = null; // set par le Router (wiring des events)
     this.onConfigChange = null; // set par le Router (re-emet tools/list_changed)
     this.supervisor = null; // lazy : cree au 1er profil HTTP (mode stdio pur => jamais instancie)
+    this._watchdogOptions = options.watchdog || {};
+    this._autoRestartOptions = {
+      maxRestarts: options.autoRestart?.maxRestarts ?? DEFAULT_MAX_RESTARTS,
+      windowMs: options.autoRestart?.windowMs ?? DEFAULT_WINDOW_MS,
+    };
+    this._restartHistory = new Map(); // profile -> number[] timestamps des auto-restarts declenches (anti-boucle)
     this._loadConfig();
     this._watch();
   }
@@ -112,12 +124,57 @@ export class Manager {
     if (b && b.ready) return b;
     if (!b) {
       const transport = await this._makeTransport(profile);
-      b = new Backend(profile, transport);
+      b = new Backend(profile, transport, this._watchdogOptions);
       this.backends.set(profile, b);
+      // COUCHE 2b (auto-restart, 0-human) : reagit UNIQUEMENT au gel detecte par le watchdog
+      // (sig==='unresponsive', cf _onBackendUnresponsive). Cable AVANT tout message (comme onNewBackend).
+      b.on('exit', (code, sig) => this._onBackendUnresponsive(profile, sig, b));
       if (this.onNewBackend) this.onNewBackend(b); // wiring AVANT tout message
     }
     await b.start(this.clientInfo);
     return b;
+  }
+
+  // Auto-restart (0-human, COUCHE 2b du bug de GEL) : recycle SEUL un backend que le watchdog a
+  // declare fige, sans attendre que Claude appelle restart_profile a la main.
+  // ⚠️ SCOPE STRICT : ne reagit QU'AU gel detecte par le watchdog liveness (backend.js _pingOnce).
+  // 'unresponsive' n'est JAMAIS emis ailleurs (grep : seul _onExit(-1,'unresponsive') l'utilise) =>
+  // un stop() volontaire (stopAll/_reconcile/restartProfile lui-meme) emet 'close'/'error'/exit stdio,
+  // JAMAIS 'unresponsive' => AUCUNE garde supplementaire requise, ce filtre suffit par construction.
+  // ⚠️ ANTI-RECURSION : restartProfile() appelle b.stop() -> transport.close() -> _onExit(null,'close')
+  // sur l'ANCIEN backend => sig='close' => le filtre ci-dessus l'ignore (pas de re-declenchement).
+  async _onBackendUnresponsive(profile, sig, backend) {
+    if (sig !== 'unresponsive') return; // seul le gel watchdog nous interesse (cf commentaire ci-dessus)
+    if (this.backends.get(profile) !== backend) return; // event PERIME : ce backend a deja ete remplace
+
+    const now = Date.now();
+    const hist = this._restartHistory.get(profile) || [];
+    const allowed = shouldAutoRestart(hist, now, this._autoRestartOptions);
+
+    if (!allowed) {
+      // ANTI-BOUCLE (dead-man) : on ne restart PAS a l'infini un profil qui gele en boucle -> on crie
+      // au lieu de boucler en silence (0-human = crier, pas travailler pour rien).
+      const msg = `pw-mcp-proxy: profil "${profile}" en BOUCLE de gel (>=${this._autoRestartOptions.maxRestarts} auto-restarts en ${this._autoRestartOptions.windowMs}ms) — auto-restart SUSPENDU, redemarrage de Claude Code probablement requis.`;
+      log(msg);
+      alert(msg, this.config?.ntfyUrl);
+      return;
+    }
+
+    // Purge les timestamps HORS fenetre en meme temps qu'on enregistre le nouveau : la liste reste
+    // bornee (jamais de croissance illimitee sur une longue session) ET l'historique ne porte que ce
+    // que shouldAutoRestart regarde. NE PAS remplacer par un simple `[...hist, now]` (fuite + histo faux).
+    const windowStart = now - this._autoRestartOptions.windowMs;
+    this._restartHistory.set(profile, [...hist.filter((t) => t > windowStart), now]);
+    log(`[auto-restart] profil "${profile}" declare unresponsive par le watchdog => restart automatique`);
+    try {
+      await this.restartProfile(profile);
+    } catch (e) {
+      // Cas "gel grave" (BACKLOG.md) : le respawn lui-meme ne revient pas -> alerte bruyante, jamais
+      // un echec silencieux (le proxy resterait mort sans que personne ne le sache).
+      const msg = `pw-mcp-proxy: auto-restart de "${profile}" a ECHOUE (${e?.message || e}) — serveur probablement mort, redemarrage de Claude Code requis.`;
+      log(msg);
+      alert(msg, this.config?.ntfyUrl);
+    }
   }
 
   // Fabrique le transport d'un profil. Mode HTTP (MULTI-AGENT) : le superviseur GARANTIT le serveur
@@ -151,6 +208,12 @@ export class Manager {
   // 1) stop() du backend connu (tree-kill son arbre) ; 2) sweep de tout ORPHELIN tenant encore
   // le lock de CE user-data-dir (backend d'un proxy deja mort) ; 3) respawn immediat.
   // Chirurgical par user-data-dir => n'affecte QUE ce profil (jamais l'autre compte ni le Chrome perso).
+  // ⚠️ MULTI-AGENT (appelant = humain via tool OU _onBackendUnresponsive automatique) : en mode HTTP
+  // partage, ce restart recycle le serveur PARTAGE (sweepByCmd userDataDir) => impacte TOUS les agents
+  // actuellement clients de ce profil. C'est ACCEPTE PAR DESIGN (c'est l'automatisation de l'outil manuel
+  // restart_profile, prevu pour debloquer un profil FIGE — un profil fige est deja inutilisable pour
+  // TOUS ses clients) ; l'anti-boucle de _onBackendUnresponsive (shouldAutoRestart) borne l'emballement
+  // pour ne pas thrasher le serveur partage a chaque gel repete. NE PAS reintroduire de boot-sweep global.
   async restartProfile(profile) {
     if (!this.config.profiles[profile]) throw new Error(`profil inconnu: ${profile}`);
     const b = this.backends.get(profile);
