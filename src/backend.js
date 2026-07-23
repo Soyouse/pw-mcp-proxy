@@ -26,6 +26,7 @@ export class Backend extends EventEmitter {
     this._idCounter = 0;
     this._internal = new Map(); // id -> {resolve,reject}  (requetes internes du proxy : initialize, tools/list, ping)
     this._forward = new Map(); // backendId -> clientId    (requetes Claude->backend en vol)
+    this._forwardMeta = new Map(); // backendId -> {tool, startedAt}  (FORENSIQUE : quoi + depuis quand, pour le rapport de gel)
     this._startPromise = null;
     this._exited = false;
     // Watchdog : n'agit que TANT QU'une requete est en vol (spec MCP utilities/ping : eviter le ping excessif).
@@ -97,8 +98,17 @@ export class Backend extends EventEmitter {
   forwardRequest(clientMsg) {
     const id = this._nextId();
     this._forward.set(id, clientMsg.id);
+    // FORENSIQUE (non-intrusif) : on retient CE qui est en vol (nom du tool si tools/call, sinon method)
+    // + DEPUIS QUAND. Sert UNIQUEMENT au rapport de gel (freeze-report) — jamais a une decision.
+    this._forwardMeta.set(id, { tool: clientMsg?.params?.name || clientMsg?.method || '?', startedAt: Date.now() });
     this._startWatchdog(); // une requete est en vol => surveiller la vivacite du backend
     this._write({ ...clientMsg, id });
+  }
+
+  // Instantane FORENSIQUE des requetes en vol : [{method, ageMs}] (age = maintenant - depart). Lu au
+  // moment d'un gel pour le rapport. PUR de lecture (n'altere rien). now injectable pour les tests.
+  inflightSummary(now = Date.now()) {
+    return [...this._forwardMeta.values()].map((m) => ({ method: m.tool, ageMs: now - m.startedAt }));
   }
 
   // ---------- watchdog de liveness (ping applicatif MCP) ----------
@@ -142,6 +152,9 @@ export class Backend extends EventEmitter {
     this._missedPings += 1;
     if (this._missedPings >= this._maxMissedPings) {
       log(`[backend:${this.profile}] FIGE: ${this._missedPings} pings sans reponse => backend declare mort (unresponsive)`);
+      // FORENSIQUE : snapshot AVANT _onExit (qui vide _forwardMeta). Le manager ecoute 'freeze' pour
+      // ecrire le rapport riche (etat process, etc.). Emis UNIQUEMENT sur gel detecte => jamais bruyant.
+      this.emit('freeze', { missedPings: this._missedPings, inflight: this.inflightSummary() });
       this._onExit(-1, 'unresponsive'); // renvoie -32000 aux requetes en vol + stoppe le watchdog
     }
   }
@@ -172,6 +185,7 @@ export class Backend extends EventEmitter {
       if (this._forward.has(m.id)) {
         const clientId = this._forward.get(m.id);
         this._forward.delete(m.id);
+        this._forwardMeta.delete(m.id); // FORENSIQUE : la requete a repondu => plus en vol
         if (this._forward.size === 0) this._stopWatchdog(); // plus rien en vol => on cesse de pinger
         this.emit('toClient', { ...m, id: clientId });
         return;
@@ -209,6 +223,7 @@ export class Backend extends EventEmitter {
       });
     }
     this._forward.clear();
+    this._forwardMeta.clear();
     if (wasReady) log(`[backend:${this.profile}] exited code=${code} sig=${sig}`);
     this.emit('exit', code, sig);
   }

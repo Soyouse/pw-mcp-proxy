@@ -14,6 +14,7 @@ export default defineConfig({
       'tests/sse-parse.test.js',
       'tests/log-rotate.test.js',
       'tests/auto-restart.test.js',
+      'tests/freeze-report.test.js',
     ],
     globals: false,
   },

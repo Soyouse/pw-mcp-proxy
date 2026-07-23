@@ -4,11 +4,11 @@
   "packageManager": "npm",
   "testRunner": "vitest",
   "vitest": { "configFile": "vitest.pure.config.js" },
-  "mutate": ["src/collision.js", "src/prockill-pure.js", "src/spec.js", "src/server-registry.js", "src/sse-parse.js", "src/spawn-cmd.js", "src/log-rotate.js", "src/auto-restart.js"],
+  "mutate": ["src/collision.js", "src/prockill-pure.js", "src/spec.js", "src/server-registry.js", "src/sse-parse.js", "src/spawn-cmd.js", "src/log-rotate.js", "src/auto-restart.js", "src/freeze-report.js"],
   "reporters": ["clear-text", "progress"],
   "coverageAnalysis": "perTest",
   "concurrency": 4,
   "timeoutMS": 60000,
-  "_ratchet": "break=94 = plancher tenu 2026-07-13 (94.48% avec 6 modules purs), 94.94% avec auto-restart.js (2026-07-22). Les survivants restants sont des mutants EQUIVALENTS documentes : collision/prockill (fallbacks `|| []`) ; server-registry L40:14 (valeur non-numerique ajoutee a un Set de ports = jamais de collision) + boucle de sonde (i<=span/i-- : le port avance => pas de boucle infinie, ecart seulement a saturation irrealiste) ; sse-parse (String(block ?? '') + gardes ligne-vide/commentaire neutralisees par le `default:` du switch) ; spawn-cmd (classe de caracteres du regex isAbsolute + forme de l'objet retourne = equivalents) ; auto-restart.js L23:69 (fallback non-array `[\"Stryker was here\"]` : la valeur factice echoue de toute facon le filtre `typeof t==='number'` en aval, indistinguable de `[]`). NE JAMAIS BAISSER ce gate ; le remonter si un refactor tue des equivalents.",
+  "_ratchet": "break=94 = plancher tenu 2026-07-13 (94.48% avec 6 modules purs), 94.94% avec auto-restart.js (2026-07-22). Les survivants restants sont des mutants EQUIVALENTS documentes : collision/prockill (fallbacks `|| []`) ; server-registry L40:14 (valeur non-numerique ajoutee a un Set de ports = jamais de collision) + boucle de sonde (i<=span/i-- : le port avance => pas de boucle infinie, ecart seulement a saturation irrealiste) ; sse-parse (String(block ?? '') + gardes ligne-vide/commentaire neutralisees par le `default:` du switch) ; spawn-cmd (classe de caracteres du regex isAbsolute + forme de l'objet retourne = equivalents) ; auto-restart.js L23:69 (fallback non-array `[\"Stryker was here\"]` : la valeur factice echoue de toute facon le filtre `typeof t==='number'` en aval, indistinguable de `[]`) ; freeze-report.js 98.48% (1 survivant equivalent : fallback de valeur factice sur un champ non teste au format identique). Score global 95.44% (2026-07-23, 9 modules). NE JAMAIS BAISSER ce gate ; le remonter si un refactor tue des equivalents.",
   "thresholds": { "high": 98, "low": 94, "break": 94 }
 }

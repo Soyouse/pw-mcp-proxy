@@ -17,7 +17,7 @@ import { Backend } from '../src/backend.js';
 import { HttpTransport } from '../src/http-transport.js';
 import { buildSpec } from '../src/spec.js';
 import { serverEntry } from '../src/server-registry.js';
-import { treeKill } from '../src/prockill.js';
+import { treeKill, isPidAlive, listProcesses } from '../src/prockill.js';
 
 const LIVE = process.env.PW_MCP_LIVE === '1';
 const VERSION = process.env.PW_MCP_VERSION || '0.0.78'; // PIN : aligner sur profiles.json
@@ -115,5 +115,64 @@ test.skipIf(!LIVE)('LIVE : profil PERSISTANT partage (--user-data-dir jetable + 
 
   a.stop();
   b.stop();
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+});
+
+test.skipIf(!LIVE)('LIVE : MORT de Chrome sous serveur VIVANT => l action REVIENT (jamais un pend) + node survit + ping/probe AVEUGLES', async () => {
+  // ⚠️ CONTRAT MESURE 2026-07-23 (couche 2a, cf memory reference-browser-mcp-freeze-bug). Quand le
+  // Chrome d'un serveur @playwright/mcp VIVANT meurt, le serveur node NE PEND JAMAIS : l'action
+  // suivante REVIENT vite — soit en erreur (« browser has been closed »), soit en SUCCES car le
+  // serveur RELANCE le navigateur tout seul (auto-recovery observe). Les DEUX prouvent la resilience ;
+  // l'issue exacte (erreur vs recovery) est NON-DETERMINISTE (course) => on NE l'assert PAS (sinon
+  // flaky). Le ping MCP ET le GET /mcp restent VERTS (AVEUGLES a la mort du browser) => le watchdog
+  // couche 1 ne couvre PAS ce cas, et n'a PAS a le couvrir (le vrai pend passe par un ping muet, teste
+  // plus haut). Ce test SCELLE le SEUL invariant qui compte : PAS DE PEND. Si un bump PW le casse (ex:
+  // l'action se met a PENDRE), il ROUGIT en nightly AVANT tout deploiement.
+  // ⚠️ le needle NE DOIT PAS contenir un mot-cle browser (chrome/chromium…) : il apparait dans le
+  // --user-data-dir de TOUS les process (serveur node + wrapper npx inclus) => sinon le filtre browser
+  // ci-dessous matcherait le wrapper cmd.exe/npx et le treeKill /T tuerait aussi le serveur node.
+  const dir = path.join(os.tmpdir(), `pw-mcp-live-bkill-${process.pid}`);
+  const spec = buildSpec('cd', { userDataDir: dir, args: ['--headless'], backend: { command: 'npx', args: ['-y', `@playwright/mcp@${VERSION}`] } }, {}, { http: true });
+  const needle = path.basename(dir); // fragment UNIQUE present dans la cmdline de chaque enfant browser
+
+  const url = await sup.ensureServer('cd', spec, { userDataDir: dir });
+  const serverPid = serverEntry(sup._read(), 'cd').pid;
+  const port = serverEntry(sup._read(), 'cd').port;
+  // Watchdog quasi desactive (pingIntervalMs enorme) : on mesure le contrat BRUT du serveur, pas la couche 1.
+  const a = new Backend('cd', new HttpTransport(url, { protocolVersion: CLIENT.protocolVersion, spec }), { pingIntervalMs: 3600000 });
+  await a.start(CLIENT);
+
+  // Lance reellement le browser (navigate) : etat SAIN de reference.
+  const ok = await a.request('tools/call', { name: 'browser_navigate', arguments: { url: 'data:text/html,<title>ok</title>' } });
+  expect(ok?.isError, 'navigate sain OK (browser lance)').not.toBe(true);
+
+  // Tue UNIQUEMENT le(s) process BROWSER de ce profil (binaire chrome/headless, JAMAIS node : sinon on
+  // tuerait le serveur qu'on veut garder vivant). Cross-OS via listProcesses (ps/CIM) + treeKill.
+  const browserPids = listProcesses()
+    .filter((p) => p.cmd.includes(needle) && /(chrome|chromium|headless_shell|msedge)/i.test(p.cmd) && !/node|npx|cmd\.exe/i.test(p.cmd))
+    .map((p) => p.pid);
+  expect(browserPids.length, 'au moins un process browser a tuer').toBeGreaterThan(0);
+  for (const pid of browserPids) { try { treeKill(pid); } catch {} }
+  await new Promise((r) => setTimeout(r, 1500)); // laisse le node « digerer » la mort du browser
+
+  // CONTRAT 1 : le node serveur SURVIT (ne s'arrete PAS sur disconnected sur cette version).
+  expect(isPidAlive(serverPid), 'le serveur node survit a la mort de son Chrome').toBe(true);
+  // CONTRAT 2 : le GET /mcp reste VERT (aveugle a la mort du browser).
+  expect(await sup._probeReady(port), '_probeReady reste vert (aveugle a la mort du browser)').toBe(true);
+  // CONTRAT 3 : le ping MCP repond {} (aveugle : le node vit, seul le browser est mort).
+  expect(await a.request('ping', {}), 'ping reste vert (aveugle)').toEqual({});
+  // CONTRAT 4 (LE coeur, la seule chose qui compte) : l'action REVIENT en <20s — erreur OU succes
+  // (auto-recovery), peu importe — mais JAMAIS un pend. `pended` reste false SSI l'action a resolu/rejete
+  // avant 20s ; un pend => `pended=true` => ROUGE (le contrat PW a bascule vers le pend => reagir).
+  let pended = true;
+  await Promise.race([
+    a.request('tools/call', { name: 'browser_navigate', arguments: { url: 'data:text/html,<title>after</title>' } })
+      .then(() => { pended = false; }).catch(() => { pended = false; }),
+    new Promise((r) => setTimeout(r, 20000)),
+  ]);
+  expect(pended, 'action apres mort du browser REVIENT en <20s (erreur ou recovery), JAMAIS un pend').toBe(false);
+
+  a.stop();
+  try { treeKill(serverPid); } catch {}
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
 });

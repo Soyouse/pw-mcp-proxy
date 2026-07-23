@@ -12,9 +12,11 @@ import { HttpTransport } from './http-transport.js';
 import { Supervisor } from './supervisor.js';
 import { log } from './logger.js';
 import { alert } from './notify.js';
-import { sweepByCmd } from './prockill.js';
+import { sweepByCmd, listProcesses, isPidAlive } from './prockill.js';
 import { buildSpec } from './spec.js';
 import { shouldAutoRestart, DEFAULT_MAX_RESTARTS, DEFAULT_WINDOW_MS } from './auto-restart.js';
+import { formatFreezeReport } from './freeze-report.js';
+import { serverEntry } from './server-registry.js';
 
 const DEFAULT_CLIENT_INFO = {
   protocolVersion: '2025-06-18',
@@ -129,6 +131,10 @@ export class Manager {
       // COUCHE 2b (auto-restart, 0-human) : reagit UNIQUEMENT au gel detecte par le watchdog
       // (sig==='unresponsive', cf _onBackendUnresponsive). Cable AVANT tout message (comme onNewBackend).
       b.on('exit', (code, sig) => this._onBackendUnresponsive(profile, sig, b));
+      // FORENSIQUE (0-human : « ne jamais rester dans l'ignorance ») : sur un GEL detecte par le
+      // watchdog, ecrire un rapport RICHE (etat process Chrome, requetes en vol) => la prochaine
+      // occurrence d'un bug tordu est diagnosticable. Observation SEULE, ne change aucune decision.
+      b.on('freeze', (info) => this._logFreezeReport(profile, info));
       if (this.onNewBackend) this.onNewBackend(b); // wiring AVANT tout message
     }
     await b.start(this.clientInfo);
@@ -174,6 +180,41 @@ export class Manager {
       const msg = `pw-mcp-proxy: auto-restart de "${profile}" a ECHOUE (${e?.message || e}) — serveur probablement mort, redemarrage de Claude Code requis.`;
       log(msg);
       alert(msg, this.config?.ntfyUrl);
+    }
+  }
+
+  // FORENSIQUE (I/O) : au moment d'un GEL (event 'freeze' du backend), collecte l'etat REEL et ecrit
+  // le rapport via freeze-report (PUR). But 0-human : « ne jamais rester dans l'ignorance » — la
+  // prochaine occurrence d'un bug tordu (gel 22/07 jamais capture) devient diagnosticable.
+  // ⚠️ BEST-EFFORT : ne throw JAMAIS (un echec de diagnostic ne doit pas perturber le flux du proxy) ;
+  // OBSERVATION SEULE (ne tue rien, ne decide rien — le restart reste gere par _onBackendUnresponsive).
+  // Cout de listProcesses acceptable : emis UNIQUEMENT sur gel detecte (rare), jamais dans le chemin chaud.
+  _logFreezeReport(profile, info = {}) {
+    try {
+      const cfg = this.config.profiles?.[profile] || {};
+      const udd = cfg.userDataDir || null;
+      let serverPid = null, serverAlive = null, port = null, browserCount = null;
+      if (this._isHttp(profile)) {
+        try {
+          const entry = serverEntry(this._sup()._read(), profile);
+          if (entry) { serverPid = entry.pid; port = entry.port; serverAlive = isPidAlive(entry.pid); }
+        } catch {}
+      }
+      if (udd) {
+        try {
+          // Discriminant Chrome mort/fige. Normalise les slashes (Windows \ vs Unix /) pour ne pas
+          // rater le match => un faux « AUCUN Chrome » tromperait le diagnostic. Meme filtre binaire
+          // que le drift-test (chrome/headless, jamais node/npx/cmd wrappers).
+          const uddN = udd.replace(/\\/g, '/');
+          browserCount = listProcesses().filter((p) => {
+            const c = p.cmd.replace(/\\/g, '/');
+            return c.includes(uddN) && /(chrome|chromium|headless_shell|msedge)/i.test(c) && !/node|npx|cmd\.exe/i.test(c);
+          }).length;
+        } catch {}
+      }
+      log(formatFreezeReport({ profile, reason: 'unresponsive', serverPid, serverAlive, port, browserCount, missedPings: info.missedPings, inflight: info.inflight }));
+    } catch (e) {
+      log(`[freeze-report] echec du diagnostic pour "${profile}": ${e?.message || e}`);
     }
   }
 
