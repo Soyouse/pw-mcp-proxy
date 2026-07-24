@@ -1,6 +1,16 @@
 // http-transport.js — I/O : client MCP « Streamable HTTP » (transport standard MCP 2025-11-25).
-// ZERO dependance : fetch/AbortController/ReadableStream natifs (Node>=20). Le FRAMING SSE vient de
-// sse-parse.js (pur). ICI : le reseau + le respect du contrat CLIENT (skill playwright-mcp-api).
+// ZERO dependance : node:http natif. Le FRAMING SSE vient de sse-parse.js (pur).
+// ICI : le reseau + le respect du contrat CLIENT (skill playwright-mcp-api).
+//
+// ⚠️ POURQUOI node:http ET PAS fetch (NE PAS revenir a fetch — gate statique no-fetch.test.js) :
+// fetch (undici) applique un bodyTimeout par DEFAUT de 300 s ENTRE deux chunks (doc officielle
+// undici Client.md, verifiee 2026-07-24) et fetch ne permet PAS de le desactiver sans passer un
+// dispatcher undici custom = dependance runtime (interdite). Consequence mesuree en prod : le flux
+// GET SSE idle etait COUPE toutes les ~5 min (« SSE read err: terminated » en boucle) et la reponse
+// SSE d'un POST d'action LONGUE (upload 12 min, flux muet pendant l'action = contrat Streamable
+// HTTP) aurait ete tuee a 300 s = reponse PERDUE. node:http n'a AUCUN timeout de body par defaut ;
+// la liveness reste garantie par le watchdog ping de backend.js (fails-closed), jamais par un
+// timeout d'inactivite (interdit — tuerait l'action longue legitime).
 //
 // Modele : full-duplex evenementiel pour rester un remplacant transparent du transport stdio.
 //   - send(msg)  : POST le message (fire-and-forget cote appelant) ; les messages RECUS (la reponse
@@ -13,6 +23,7 @@
 //   POST + Accept: application/json,text/event-stream ; gerer JSON *ou* SSE ; renvoyer MCP-Session-Id
 //   sur toutes les requetes des qu'il est fourni ; MCP-Protocol-Version post-init ; 404 => session morte.
 
+import http from 'node:http';
 import { EventEmitter } from 'node:events';
 import { sseFeed } from './sse-parse.js';
 import { log } from './logger.js';
@@ -24,6 +35,7 @@ export class HttpTransport extends EventEmitter {
   constructor(url, { protocolVersion = '2025-06-18', spec = null } = {}) {
     super();
     this.url = url;
+    this._u = new URL(url); // parse une fois (hostname/port/path stables)
     this.protocolVersion = protocolVersion;
     this.spec = spec; // { command, args, label } : lu par le Manager (_reconcile compare spec.args)
     this.sessionId = null; // fourni par le serveur a l'initialize (peut rester null : mode stateless)
@@ -43,39 +55,69 @@ export class HttpTransport extends EventEmitter {
     return h;
   }
 
+  // Requete HTTP bas-niveau (node:http). Resout a la reception des HEADERS ({status, headers, stream}) ;
+  // le corps (stream = IncomingMessage) est consomme par l'appelant. AUCUN timeout pose ici (voir
+  // l'entete du fichier) ; `signal` optionnel pour couper (flux GET au close()).
+  _req(method, headers, body, signal) {
+    return new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: this._u.hostname,
+          port: this._u.port,
+          path: this._u.pathname + this._u.search,
+          method,
+          headers,
+          signal,
+        },
+        (res) => resolve({ status: res.statusCode, headers: res.headers, stream: res })
+      );
+      req.on('error', reject);
+      if (body !== undefined) req.write(body);
+      req.end();
+    });
+  }
+
   // POST un message. La/les reponse(s) remontent via l'event 'message'. Ne throw pas : signale
   // les echecs de transport via l'event 'error' (le Backend les traite comme une perte de backend).
   async send(msg) {
     if (this._closed) return;
     let res;
     try {
-      res = await fetch(this.url, {
-        method: 'POST',
-        headers: this._headers({ 'content-type': 'application/json', accept: 'application/json, text/event-stream' }),
-        body: JSON.stringify(msg),
-      });
+      res = await this._req(
+        'POST',
+        this._headers({ 'content-type': 'application/json', accept: 'application/json, text/event-stream' }),
+        JSON.stringify(msg)
+      );
     } catch (e) {
-      this._fail('POST fetch: ' + e.message);
+      this._fail('POST request: ' + e.message);
       return;
     }
 
-    const sid = res.headers.get(SESSION_HEADER);
+    const sid = res.headers[SESSION_HEADER];
     if (sid) this.sessionId = sid; // capture a l'initialize
 
-    if (res.status === 202) { this._ensureGetStream(); return; } // notif/response acceptee, pas de corps
-    if (res.status === 404) { this._fail('session expiree (404)'); return; }
-    if (!res.ok) { this._fail(`HTTP ${res.status}`); return; }
+    if (res.status === 202) { res.stream.resume(); this._ensureGetStream(); return; } // notif/response acceptee, pas de corps
+    if (res.status === 404) { res.stream.resume(); this._fail('session expiree (404)'); return; }
+    if (res.status < 200 || res.status >= 300) { res.stream.resume(); this._fail(`HTTP ${res.status}`); return; }
 
-    const ct = res.headers.get('content-type') || '';
+    const ct = res.headers['content-type'] || '';
     if (ct.includes('text/event-stream')) {
-      await this._consumeSse(res.body); // la reponse JSON-RPC arrive dans le flux, puis le serveur clot
+      await this._consumeSse(res.stream); // la reponse JSON-RPC arrive dans le flux, puis le serveur clot
     } else {
       // application/json (ou defaut) : un unique message (ou un batch)
       let body;
-      try { body = await res.json(); } catch (e) { this._fail('reponse JSON illisible: ' + e.message); return; }
+      try {
+        body = JSON.parse(await this._readAll(res.stream));
+      } catch (e) { this._fail('reponse JSON illisible: ' + e.message); return; }
       this._emitMessage(body);
     }
     this._ensureGetStream(); // apres l'init, ouvrir le sens serveur->client
+  }
+
+  async _readAll(stream) {
+    const chunks = [];
+    for await (const c of stream) chunks.push(c);
+    return Buffer.concat(chunks).toString('utf8');
   }
 
   _emitMessage(body) {
@@ -83,17 +125,14 @@ export class HttpTransport extends EventEmitter {
     else this.emit('message', body);
   }
 
-  // Lit un flux SSE jusqu'a sa fin, re-emet chaque event data qui parse en JSON-RPC.
+  // Lit un flux SSE (IncomingMessage) jusqu'a sa fin, re-emet chaque event data qui parse en JSON-RPC.
   async _consumeSse(stream) {
     if (!stream) return;
-    const reader = stream.getReader();
     const dec = new TextDecoder();
     let pending = '';
     try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        const r = sseFeed(pending, dec.decode(value, { stream: true }));
+      for await (const chunk of stream) {
+        const r = sseFeed(pending, dec.decode(chunk, { stream: true }));
         pending = r.pending;
         for (const ev of r.events) {
           if (!ev.data) continue; // priming/keep-alive (data vide) : ignore
@@ -104,8 +143,6 @@ export class HttpTransport extends EventEmitter {
       }
     } catch (e) {
       if (!this._closed) log('SSE read err: ' + e.message);
-    } finally {
-      try { reader.releaseLock(); } catch {}
     }
   }
 
@@ -122,24 +159,21 @@ export class HttpTransport extends EventEmitter {
       this._getAbort = new AbortController();
       let res;
       try {
-        res = await fetch(this.url, {
-          method: 'GET',
-          headers: this._headers({ accept: 'text/event-stream' }),
-          signal: this._getAbort.signal,
-        });
+        res = await this._req('GET', this._headers({ accept: 'text/event-stream' }), undefined, this._getAbort.signal);
       } catch {
         if (this._closed) return;
         await this._delay(500);
         continue;
       }
-      if (res.status === 405) return; // serveur sans flux GET : legitime, on s'en passe
-      if (res.status === 404) { this._fail('session expiree (404 GET)'); return; }
-      if (!res.ok || !(res.headers.get('content-type') || '').includes('text/event-stream')) {
+      if (res.status === 405) { res.stream.resume(); return; } // serveur sans flux GET : legitime, on s'en passe
+      if (res.status === 404) { res.stream.resume(); this._fail('session expiree (404 GET)'); return; }
+      if (res.status < 200 || res.status >= 300 || !(res.headers['content-type'] || '').includes('text/event-stream')) {
+        res.stream.resume();
         if (this._closed) return;
         await this._delay(500);
         continue;
       }
-      await this._consumeSse(res.body);
+      await this._consumeSse(res.stream);
       if (this._closed) return;
       await this._delay(300); // stream clos par le serveur : petite pause puis re-ouverture
     }
@@ -159,7 +193,8 @@ export class HttpTransport extends EventEmitter {
     // DELETE explicite (SHOULD) : libere la session cote serveur. Best-effort.
     if (this.sessionId) {
       try {
-        await fetch(this.url, { method: 'DELETE', headers: this._headers({}) });
+        const res = await this._req('DELETE', this._headers({}));
+        res.stream.resume();
       } catch {}
     }
     this.emit('close');

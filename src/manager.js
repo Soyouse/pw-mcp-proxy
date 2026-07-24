@@ -124,6 +124,19 @@ export class Manager {
     if (!this.config.profiles[profile]) throw new Error(`profil inconnu: ${profile}`);
     let b = this.backends.get(profile);
     if (b && b.ready) return b;
+    // Backend EXITE = cadavre (bug live 2026-07-23) : son transport porte une session morte (http :
+    // sessionId perime => re-initialize prend un 404 avale par l'idempotence de _onExit => promesse
+    // eternelle => appel MCP qui pend 120 s ; stdio : child mort). NE JAMAIS le ranimer : on le purge
+    // et on reconstruit backend + transport FRAIS (nouvelle session HTTP via _makeTransport, qui
+    // re-registerClient aupres du superviseur). stop() = close best-effort (DELETE session, treeKill stdio).
+    if (b && b.exited) {
+      // LOG SIGNAL (traçabilité incident) : c'est cette ligne qui rend le remplacement VISIBLE dans
+      // pw-mcp-proxy.log — le bug du 23/07 n'a été trouvé QUE grâce aux logs. NE PAS la retirer.
+      log(`[backend:${profile}] exited => purge du cadavre + respawn (transport/session frais)`);
+      b.stop();
+      this.backends.delete(profile);
+      b = null;
+    }
     if (!b) {
       const transport = await this._makeTransport(profile);
       b = new Backend(profile, transport, this._watchdogOptions);

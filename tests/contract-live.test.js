@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import { Supervisor } from '../src/supervisor.js';
 import { Backend } from '../src/backend.js';
 import { HttpTransport } from '../src/http-transport.js';
+import { Manager } from '../src/manager.js';
 import { buildSpec } from '../src/spec.js';
 import { serverEntry } from '../src/server-registry.js';
 import { treeKill, isPidAlive, listProcesses } from '../src/prockill.js';
@@ -175,4 +176,63 @@ test.skipIf(!LIVE)('LIVE : MORT de Chrome sous serveur VIVANT => l action REVIEN
   a.stop();
   try { treeKill(serverPid); } catch {}
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+});
+
+test.skipIf(!LIVE)('LIVE : serveur partage TUE sous un Manager REEL => echec RAPIDE (jamais un pend) puis reprise TRANSPARENTE via get()', async () => {
+  // ⚠️ SCELLEMENT LIVE du bug « backend zombie » (2026-07-23/24, cf manager-dead-backend.test.js pour
+  // la version transport-factice) sur le VRAI binaire + le VRAI chemin de prod (Manager complet :
+  // ensureServer + registerClient + HttpTransport + Backend). Scenario de prod exact : le serveur
+  // partage meurt/est remplace (reap, restart d'un autre agent) => la session de CE proxy est morte.
+  // CONTRATS : (1) l'appel en vol/suivant sur l'ancien backend ECHOUE VITE (erreur, jamais un pend
+  // 120 s) ; (2) get() reconstruit backend + transport FRAIS et le superviseur self-heal respawn un
+  // nouveau serveur => l'action suivante REUSSIT, 0-human, transparent. Si une regression ranime un
+  // cadavre (le bug exact), le pend revient => ce test ROUGIT en nightly.
+  const mgrCfg = path.join(os.tmpdir(), `pw-mcp-live-mgr-${process.pid}.json`);
+  fs.writeFileSync(mgrCfg, JSON.stringify({
+    http: true,
+    defaultProfile: 'anon2',
+    profiles: { anon2: { label: 'anon2', isolated: true, args: ['--headless'], backend: { command: 'npx', args: ['-y', `@playwright/mcp@${VERSION}`] } } },
+  }));
+  const mgr = new Manager(mgrCfg, { watchdog: { pingIntervalMs: 3600000 } }); // watchdog neutralise : on teste le chemin exit/rebuild, pas le gel
+  try {
+    const b1 = await mgr.get('anon2');
+    const r1 = await b1.request('tools/call', { name: 'browser_navigate', arguments: { url: 'data:text/html,<title>sain</title>' } });
+    expect(r1?.isError, 'etat sain de reference (navigate OK)').not.toBe(true);
+    const pid1 = serverEntry(mgr.supervisor._read(), 'anon2').pid;
+
+    // Le serveur partage meurt sous nos pieds (reap/restart d'un autre agent, crash...).
+    treeKill(pid1);
+    await new Promise((r) => setTimeout(r, 1500));
+
+    // CONTRAT 1 : l'appel suivant sur l'ANCIEN backend echoue VITE (POST refuse => 'error' => reject),
+    // JAMAIS un pend de 120 s.
+    let pended = true;
+    await Promise.race([
+      b1.request('tools/call', { name: 'browser_navigate', arguments: { url: 'data:text/html,<title>x</title>' } })
+        .then(() => { pended = false; }).catch(() => { pended = false; }),
+      new Promise((r) => setTimeout(r, 15000)),
+    ]);
+    expect(pended, 'appel sur session morte : echec rapide, jamais un pend').toBe(false);
+    expect(b1.exited, 'l ancien backend est tombe (exited)').toBe(true);
+
+    // CONTRAT 2 : reprise transparente — get() purge le cadavre, self-heal respawn un NOUVEAU serveur,
+    // session neuve, l'action REUSSIT sans aucune intervention.
+    const b2 = await mgr.get('anon2');
+    expect(b2, 'backend FRAIS (jamais le cadavre ranime)').not.toBe(b1);
+    const pid2 = serverEntry(mgr.supervisor._read(), 'anon2').pid;
+    expect(pid2, 'nouveau serveur respawne par le self-heal').not.toBe(pid1);
+    const r2 = await b2.request('tools/call', { name: 'browser_navigate', arguments: { url: 'data:text/html,<title>reprise</title>' } });
+    expect(r2?.isError, 'action apres reprise : SUCCES transparent').not.toBe(true);
+
+    try { treeKill(pid2); } catch {}
+  } finally {
+    mgr.stopAll();
+    try { await mgr.stopSupervision(); } catch {}
+    try {
+      const reg = JSON.parse(fs.readFileSync(mgr.supervisor.registryPath, 'utf8'));
+      for (const s of Object.values(reg.servers || {})) { try { treeKill(s.pid); } catch {} }
+    } catch {}
+    try { fs.unwatchFile(mgrCfg); } catch {}
+    try { fs.unlinkSync(mgrCfg); } catch {}
+  }
 });

@@ -46,7 +46,16 @@ export class Backend extends EventEmitter {
     return `b${this.profile}.${++this._idCounter}`;
   }
 
+  // Un backend exite est un CADAVRE : son transport porte une session morte (http : sessionId perime
+  // => tout re-send prend un 404 avale par l'idempotence de _onExit => promesse ETERNELLE ; stdio :
+  // child mort). Bug live 2026-07-23 : chaque appel MCP pendait 120 s. REJETER ici = fails-closed ;
+  // le remplacement (backend + transport frais) appartient au Manager (get()).
+  get exited() {
+    return this._exited;
+  }
+
   start(clientInfo) {
+    if (this._exited) return Promise.reject(new Error(`backend ${this.profile} a deja exited — ne se ranime jamais, respawn requis`));
     if (this._startPromise) return this._startPromise;
     this._startPromise = this._doStart(clientInfo);
     return this._startPromise;
