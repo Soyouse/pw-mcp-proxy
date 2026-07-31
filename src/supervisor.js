@@ -30,8 +30,25 @@ import {
   withoutServer,
   withClient,
   withoutClient,
+  promoteServer,
   reapDecision,
+  STATE_STARTING,
 } from './server-registry.js';
+// ⚠️ SOURCE UNIQUE des delais (budget.js). NE JAMAIS redeclarer une constante de temps ici : c'est
+// leur dispersion couche par couche qui a coute la connexion MCP du 2026-07-31.
+import {
+  READY_TIMEOUT_MS,
+  READY_POLL_MS,
+  LOCK_STALE_MS,
+  LOCK_WAIT_MS,
+  LOCK_RETRY_MS,
+  SERVER_TTL_MS,
+  HEARTBEAT_MS,
+  SPAWN_ATTEMPTS,
+  RETRY_READY_TIMEOUT_MS,
+  startStaleMs,
+} from './budget.js';
+import { allocateEphemeralPort } from './port-alloc.js';
 import { treeKill, isPidAlive, sweepByCmd } from './prockill.js';
 import { resolveShellSpawn } from './spawn-cmd.js';
 import { alert } from './notify.js';
@@ -47,11 +64,7 @@ import { log } from './logger.js';
 // contract-live.test.js scelle l'accord bout-en-bout contre le vrai binaire.
 const BIND_HOST = 'localhost'; // --host (défaut documenté)
 const URL_HOST = 'localhost'; // hôte de connexion client (URL documentée)
-const READY_TIMEOUT_MS = 20000; // budget max d'attente qu'un serveur neuf reponde sur /mcp.
-const READY_POLL_MS = 200;
-const LOCK_STALE_MS = 60000; // un verrou plus vieux que ca est vole (proxy mort en tenant le lock).
-const DEFAULT_TTL_MS = 90000; // sans heartbeat client depuis 90s => serveur reape.
-const HEARTBEAT_MS = 30000; // periode de battement client (< ttl/2 => 2 battements avant reap).
+// ⚠️ Les DELAIS ne sont PAS declares ici : ils viennent de budget.js (source unique, cf import).
 
 function idFor(configPath) {
   return crypto.createHash('sha1').update(String(configPath)).digest('hex').slice(0, 12);
@@ -65,7 +78,18 @@ function lockPathFor(configPath) {
 
 export class Supervisor {
   // clientId = identifiant unique de CE proxy (pid suffit : un proxy = un process).
-  constructor(configPath, { ttl = DEFAULT_TTL_MS, clientId = String(process.pid), ntfyUrl = null } = {}) {
+  // ⚠️ `allocatePort` est INJECTABLE (defaut = l'OS) uniquement pour que les tests puissent exercer la
+  // boucle de reessai de maniere DETERMINISTE. La prod ne passe JAMAIS d'override : le port doit venir
+  // de l'OS, jamais d'une valeur choisie par du code (c'est toute la lecon de l'incident du 31/07).
+  // ⚠️ `readyTimeoutMs` est INJECTABLE (defaut = budget.js) pour que les tests bornent leur pire cas
+  // (SPAWN_ATTEMPTS x patience) sous la limite d'un test. La PROD garde le defaut : 20 s sont
+  // necessaires a un boot legitime (premier `npx` qui telecharge le paquet). NE PAS raccourcir en prod.
+  constructor(configPath, { ttl = SERVER_TTL_MS, clientId = String(process.pid), ntfyUrl = null, allocatePort = allocateEphemeralPort, readyTimeoutMs = READY_TIMEOUT_MS } = {}) {
+    this._allocatePort = allocatePort;
+    this.readyTimeoutMs = readyTimeoutMs;
+    // Patience des REESSAIS : courte (paquet deja en cache), et JAMAIS superieure a la nominale —
+    // un test qui raccourcit la patience ne doit pas se retrouver avec des reessais PLUS longs.
+    this._retryReadyMs = Math.min(RETRY_READY_TIMEOUT_MS, readyTimeoutMs);
     this.configPath = configPath;
     this.registryPath = registryPathFor(configPath);
     this.lockPath = lockPathFor(configPath);
@@ -97,7 +121,10 @@ export class Supervisor {
   // EEXIST + stat = actions Open(present)/Check ; _tryStealStale = actions Steal* (vol serialise).
   async _lock() {
     const stealPath = this.lockPath + '.steal'; // meta-verrou serialisant le VOL (spec: variable `meta`)
-    for (let i = 0; i < 600; i++) { // ~600*50ms = 30s de patience max
+    // Patience DERIVEE de budget.js (LOCK_WAIT_MS / LOCK_RETRY_MS = 30000/50 = 600 tours : valeurs
+    // IDENTIQUES a l'historique => protocole inchange, la preuve TLC reste valable telle quelle).
+    const attempts = Math.ceil(LOCK_WAIT_MS / LOCK_RETRY_MS);
+    for (let i = 0; i < attempts; i++) {
       try {
         const fd = fs.openSync(this.lockPath, 'wx'); // spec: Open, branche lock=NoOwner => section critique
         fs.writeSync(fd, String(process.pid));
@@ -115,8 +142,8 @@ export class Supervisor {
         // prouve ROUGE par TLC (config Buggy) = deux proxys volent le meme verrou perime, le 2e supprime
         // le verrou FRAIS que le 1er vient de creer => double section critique => double spawn
         // @playwright/mcp => « browser is already in use ». Le vol DOIT passer par _tryStealStale.
-        if (stale) { if (!this._tryStealStale(stealPath)) await this._delay(50); }
-        else await this._delay(50);
+        if (stale) { if (!this._tryStealStale(stealPath)) await this._delay(LOCK_RETRY_MS); }
+        else await this._delay(LOCK_RETRY_MS);
       }
     }
     throw new Error('registry lock: timeout (verrou tenu trop longtemps)');
@@ -184,7 +211,7 @@ export class Supervisor {
       clearTimeout(t);
     }
   }
-  async _pollReady(port, budget = READY_TIMEOUT_MS) {
+  async _pollReady(port, budget = this.readyTimeoutMs) {
     const t0 = Date.now();
     while (Date.now() - t0 < budget) {
       if (await this._probeReady(port)) return true;
@@ -226,11 +253,35 @@ export class Supervisor {
       if (pid == null && userDataDir) {
         const killed = sweepByCmd([userDataDir], process.pid);
         if (killed.length) log(`[supervisor:${profile}] self-heal: ${killed.length} orphelin(s) tue(s) [${killed.join(',')}]`);
-        pid = await this._spawnReady(profile, this._read(), spec);
+        // Patience COURTE ici aussi : c'est un reessai, le paquet est deja en cache (cf budget.js).
+        pid = await this._spawnReady(profile, this._read(), spec, this._retryReadyMs);
       }
-      if (pid == null) throw new Error(`serveur ${profile} pas pret apres ${READY_TIMEOUT_MS}ms`);
+      // ⚠️ REESSAIS SUR PORT NEUF (refonte port ephemere, 2026-07-31). Chaque _spawnReady REDEMANDE un
+      // port a l'OS => un echec du a la fenetre TOCTOU (port raffle entre notre close et le bind du
+      // serveur) est resolu par le simple fait de reessayer sur un port DIFFERENT. C'est le traitement
+      // prevu et documente de cette course : borne, bruyant, jamais infini.
+      // ⚠️ Ce filet ne remplace PAS le self-heal ci-dessus (causes disjointes : lock --user-data-dir vs
+      // port) — les deux coexistent, dans cet ordre. NE PAS fusionner.
+      for (let attempt = 2; pid == null && attempt <= SPAWN_ATTEMPTS; attempt++) {
+        log(`[supervisor:${profile}] demarrage rate — nouveau port demande a l'OS (tentative ${attempt}/${SPAWN_ATTEMPTS})`);
+        pid = await this._spawnReady(profile, this._read(), spec, this._retryReadyMs);
+      }
+      // ⚠️ MESSAGE HONNETE (le precedent — « pas pret apres 20000ms » — ACCUSAIT le serveur alors qu'il
+      // demarrait tres bien : il a coute 3 h d'enquete le 31/07). On nomme ce qu'on SAIT (N tentatives,
+      // ports differents) et ce qu'on SUPPOSE, sans jamais presenter l'un pour l'autre.
+      if (pid == null) {
+        throw new Error(
+          `serveur ${profile} injoignable apres ${SPAWN_ATTEMPTS} tentatives sur ${SPAWN_ATTEMPTS} ports differents ` +
+          `(${this.readyTimeoutMs}ms chacune). Le process demarre mais ne repond pas sur la loopback : ` +
+          `suspecter un filtrage local (antivirus/VPN/pare-feu), PAS le serveur lui-meme.`
+        );
+      }
 
-      let out = withServer(this._read(), profile, { port: this._lastPort, pid, spawnedAt: Date.now() });
+      // PROMOTION : l'entree EXISTE DEJA (write-ahead de _spawnReady) ; on la fait passer 'starting' ->
+      // 'ready'. ⚠️ NE PAS la re-creer ici avec withServer : ce serait un SECOND site de construction
+      // d'entree (deux verites a maintenir en parallele = la duplication qui derive), et ca ecraserait
+      // le spawnedAt d'origine — donc le seul horodatage qui date reellement le demarrage.
+      let out = promoteServer(this._read(), profile, Date.now());
       out = withClient(out, profile, this.clientId, Date.now()); // je m'enregistre immediatement
       this._write(out);
       log(`[supervisor:${profile}] serveur pret pid=${pid} ${this.urlFor(this._lastPort)}`);
@@ -240,8 +291,22 @@ export class Supervisor {
 
   // Spawn detache d'un serveur + attente readiness. Retourne le pid si pret, sinon null (apres tree-kill
   // de la tentative ratee). _lastPort porte le port choisi (relu par ensureServer pour l'enregistrement).
-  async _spawnReady(profile, reg, spec) {
-    const port = pickPort(reg, profile);
+  //
+  // ⚠️ WRITE-AHEAD (incident 2026-07-31) : l'entree est inscrite au registre en `starting` DES QUE le pid
+  // existe, AVANT le poll de readiness. NE JAMAIS repousser cette ecriture apres le poll : entre le spawn
+  // et la promotion il s'ecoule jusqu'a READY_TIMEOUT_MS, et le serveur est DETACHE (il survit a tout).
+  // Si le proxy meurt dans cet intervalle sans que rien ne soit inscrit, le process reste VIVANT et
+  // INCONNU DE TOUS : il tient le port et le lock --user-data-dir, fait echouer le spawn suivant, met le
+  // boot hors budget client, tue la connexion, et laisse un nouvel orphelin => panne METASTABLE (le
+  // remede fabrique la cause suivante). C'est exactement ce qui a impose un `taskkill` HUMAIN le 31/07.
+  // Regle universelle du provisioning, ici non negociable : INSCRIRE L'INTENTION AVANT L'ACTION.
+  async _spawnReady(profile, reg, spec, budgetMs = this.readyTimeoutMs) {
+    // ⚠️ Le port est DEMANDE A L'OS, jamais calcule (cf port-alloc.js — incident 2026-07-31).
+    // `pickPort` ne s'en sert QUE s'il n'y a pas deja d'entree pour ce profil : le rendez-vous des
+    // agents reste le REGISTRE, inchange. Allocation A CHAQUE TENTATIVE => un reessai porte
+    // necessairement sur un port DIFFERENT (c'est ce qui rend la boucle d'ensureServer efficace ;
+    // reutiliser le meme port rejouerait le meme echec a l'identique).
+    const port = pickPort(reg, profile, await this._allocatePort());
     this._lastPort = port;
     // Resolution cross-OS centralisee (spawn-cmd.js) : sur Windows, `npx` (commande bare) EXIGE
     // shell:true + quoting, sinon le serveur ne demarre jamais (bug reproduit 2026-07-13 : timeout
@@ -257,8 +322,18 @@ export class Supervisor {
     child.on('error', (e) => log(`[supervisor:${profile}] spawn error: ${e.message}`));
     const pid = child.pid;
     child.unref(); // ⚠️ ne pas retenir l'event loop du proxy sur ce serveur detache
-    if (await this._pollReady(port)) return pid;
+    if (!pid) return null; // spawn avorte : aucun process a tracer, donc rien a inscrire ni a tuer
+    // WRITE-AHEAD : l'intention est inscrite MAINTENANT, pas apres le poll (cf en-tete de la methode).
+    // A partir d'ici, ce process est CONNU du registre : meme si ce proxy meurt a la milliseconde
+    // suivante, le reaper de n'importe quel autre agent le verra et le tuera (plus d'orphelin invisible).
+    // ⚠️ `startedAt` (instant du spawn), PAS `spawnedAt` : ce dernier est pose a la PROMOTION, donc la
+    // grace de boot du reaper reste calculee exactement comme avant le write-ahead (zero regression).
+    this._write(withServer(this._read(), profile, { port, pid, startedAt: Date.now(), state: STATE_STARTING }));
+    if (await this._pollReady(port, budgetMs)) return pid;
     try { treeKill(pid); } catch {}
+    // Tentative RATEE : on retire l'intention qu'on vient d'inscrire. Le pid vient d'etre tue ; laisser
+    // l'entree ferait croire a un serveur existant (et figerait son port pour l'essai suivant).
+    this._write(withoutServer(this._read(), profile));
     return null;
   }
 
@@ -305,13 +380,19 @@ export class Supervisor {
         const reg = this._read();
         const pids = Object.values(reg.servers || {}).map((s) => s.pid);
         const alive = pids.filter((p) => isPidAlive(p));
-        const { reap, kept } = reapDecision(reg, alive, Date.now(), this.ttl);
+        // startStaleMs() = budget au-dela duquel une entree 'starting' jamais promue est morte-nee.
+        // C'est CE parametre qui rend l'orphelin du 31/07 tuable AUTOMATIQUEMENT (0-human).
+        const { reap, kept } = reapDecision(reg, alive, Date.now(), this.ttl, startStaleMs());
         for (const r of reap) {
           try { treeKill(r.pid); } catch {}
           log(`[supervisor] reap ${r.profile} (${r.reason}) pid=${r.pid} port=${r.port}`);
           // ⚠️ Dead-man (doctrine « crier quand ca meurt ») : un serveur DEAD = mort INATTENDUE (crash)
           // vs 'idle' = fin de vie NORMALE (plus de client). On alerte UNIQUEMENT le crash pour reperer
           // une boucle de mort, sinon le self-heal respawn masquerait un backend qui plante en silence.
+          // ⚠️ 'stuck-starting' NE CRIE PAS non plus : un serveur qui n'a jamais fini de demarrer n'a
+          // pas crashe (cas courant : la fenetre Claude est fermee pendant un boot). Le confondre avec
+          // 'dead' ferait sonner le dead-man en routine — et une alerte qui sonne pour rien est une
+          // alerte qu'on cesse de lire, donc une VRAIE panne qui passera inapercue. Le log suffit ici.
           if (r.reason === 'dead') {
             alert(`serveur @playwright/mcp du profil "${r.profile}" MORT inopinement (pid=${r.pid}, port=${r.port}) — reape. Verifier un crash en boucle.`, this.ntfyUrl);
           }

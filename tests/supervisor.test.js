@@ -22,7 +22,9 @@ let cfgPath;
 const spawned = [];
 
 function newSup(opts) {
-  const s = new Supervisor(cfgPath, opts);
+  // ⚠️ Patience de readiness COURTE en test : borne le pire cas (SPAWN_ATTEMPTS x patience) bien sous
+  // la limite du test. Un port filtre par la machine ne doit JAMAIS faire rougir la suite au hasard.
+  const s = new Supervisor(cfgPath, { readyTimeoutMs: 6000, ...opts });
   spawned.push(s);
   return s;
 }
@@ -149,4 +151,33 @@ test('unregisterClient : retire mon heartbeat du registre', async () => {
   expect(serverEntry(readReg(sup), P).clients.me, 'enregistre').toBeTruthy();
   await sup.unregisterClient(P);
   expect(serverEntry(readReg(sup), P).clients.me, 'retire').toBeUndefined();
+});
+
+// ⚠️ LE RISQUE ASSUME DE LA REFONTE « PORT ALLOUE PAR L'OS » (2026-07-31) — scelle ici.
+// Avec l'ancien port CALCULE, un agent retrouvait le serveur meme si le registre disparaissait : il
+// recalculait le meme numero. Ce filet-la n'existe plus (le port n'est plus devinable), donc la
+// question posee — a juste titre — etait : « et si le registre est efface alors qu'un serveur tourne ? »
+// Reponse EXIGEE, verifiee ici plutot qu'affirmee : le superviseur s'en sort SEUL, sans humain.
+// (En prod, l'ancien serveur tenant un --user-data-dir est en plus reclame par le self-heal cible.)
+test('registre EFFACE sous un serveur vivant => ensureServer se retablit SEUL (aucun blocage)', async () => {
+  const P = prof();
+  const sup = newSup();
+  const url1 = await sup.ensureServer(P, SPEC);
+  const pid1 = serverEntry(readReg(sup), P).pid;
+  expect(isPidAlive(pid1), 'serveur #1 bien vivant').toBe(true);
+
+  // Sabotage : le registre disparait (crash disque, nettoyage de /tmp, bug d'un tiers).
+  fs.unlinkSync(sup.registryPath);
+  expect(readReg(sup).servers, 'registre bien vide').toEqual({});
+
+  // ⚠️ L'INVARIANT : un agent qui arrive apres le sinistre DOIT repartir. Un throw ici signifierait
+  // qu'une machine se retrouve sans navigateur jusqu'a intervention humaine = exactement le 31/07.
+  const url2 = await sup.ensureServer(P, SPEC);
+  expect(url2).toMatch(/^http:\/\/localhost:\d+\/mcp$/);
+  const e2 = serverEntry(readReg(sup), P);
+  expect(e2 && isPidAlive(e2.pid), 'un serveur utilisable est de nouveau enregistre').toBeTruthy();
+  expect(await sup._probeReady(e2.port), 'et il repond vraiment').toBe(true);
+  // Le port peut differer (nouveau serveur) OU non (meme serveur re-adopte) : les DEUX sont corrects.
+  // On n'assert donc PAS l'egalite des URLs — ce serait figer un detail d'implementation, pas l'invariant.
+  expect(typeof url1).toBe('string');
 });

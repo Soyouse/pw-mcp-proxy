@@ -5,7 +5,6 @@
 import { test, expect } from 'vitest';
 import fc from 'fast-check';
 import {
-  derivePort,
   pickPort,
   emptyRegistry,
   serverEntry,
@@ -14,63 +13,66 @@ import {
   withClient,
   withoutClient,
   reapDecision,
-  PORT_BASE,
-  PORT_SPAN,
+  promoteServer,
+  serverState,
+  STATE_STARTING,
+  STATE_READY,
 } from '../src/server-registry.js';
 
-// ---------- derivePort : deterministe + dans la plage ----------
-test('derivePort : deterministe (meme profil => meme port) et dans [BASE, BASE+SPAN)', () => {
-  for (const p of ['vegeta', 'perso', 'anon', 'a', '']) {
-    const a = derivePort(p);
-    const b = derivePort(p);
-    expect(a, `rendez-vous stable pour "${p}"`).toBe(b);
-    expect(a >= PORT_BASE && a < PORT_BASE + PORT_SPAN, `dans la plage pour "${p}"`).toBeTruthy();
-  }
+// ---------- pickPort : LE RENDEZ-VOUS des agents (registre), port neuf sinon ----------
+// ⚠️ Ces tests scellent la refonte du 2026-07-31 : le port n'est PLUS calcule a partir du nom de profil.
+// L'ancien schema (hash deterministe) rendait un profil DEFINITIVEMENT inutilisable des qu'un seul
+// numero devenait injoignable sur la machine (incident du 31/07, port 9639 redirige par un driver).
+// Ce qui compte — et que ces tests protegent — c'est que le rendez-vous entre agents passe par le
+// REGISTRE : un agent qui arrive doit tomber sur le serveur des autres, jamais en lancer un second.
+test('pickPort : reutilise le port du serveur existant — C EST le rendez-vous multi-agent', () => {
+  let r = emptyRegistry();
+  r = withServer(r, 'vegeta', { port: 9999, pid: 1, spawnedAt: 0 });
+  // ⚠️ Tueur de mutant : le port frais est VOLONTAIREMENT different. Si pickPort le prefererait a
+  // l'entree du registre, chaque agent lancerait SON serveur => SingletonLock viole => « browser is
+  // already in use » sur profil persistant. C'est la regression la plus grave possible ici.
+  expect(pickPort(r, 'vegeta', 4242), 'l entree du registre PRIME sur tout port neuf').toBe(9999);
 });
 
-test('property : derivePort toujours dans la plage, jamais NaN, deterministe', () => {
+test('pickPort : aucune entree => le port ALLOUE PAR L OS, tel quel (zero calcul)', () => {
+  expect(pickPort(emptyRegistry(), 'vegeta', 51234), 'rend le port fourni, sans le transformer').toBe(51234);
+});
+
+test('property : sans entree, pickPort rend EXACTEMENT le port alloue (fonction totale)', () => {
   fc.assert(
-    fc.property(fc.string(), (p) => {
-      const a = derivePort(p);
-      return Number.isInteger(a) && a >= PORT_BASE && a < PORT_BASE + PORT_SPAN && a === derivePort(p);
+    fc.property(fc.string(), fc.integer({ min: 1, max: 65535 }), (profile, fresh) => {
+      // Aucune arithmetique cachee, aucune plage imposee : le port vient de l'OS, on ne le corrige pas.
+      // ⚠️ Toute "amelioration" qui deciderait du port ici (sonde, offset, plage) reintroduirait la
+      // panne du 31/07 — le proxy ne doit JAMAIS choisir un numero.
+      return pickPort(emptyRegistry(), profile, fresh) === fresh;
     })
   );
 });
 
-// ---------- pickPort : rendez-vous si serveur connu, sinon libre ----------
-test('pickPort : reutilise le port du serveur existant (rendez-vous)', () => {
-  let r = emptyRegistry();
-  r = withServer(r, 'vegeta', { port: 9999, pid: 1, spawnedAt: 0 });
-  expect(pickPort(r, 'vegeta'), 'reprend le port enregistre, pas le derive').toBe(9999);
-});
-
-test('pickPort : evite le port occupe par un AUTRE profil (non-collision)', () => {
-  const derived = derivePort('X');
-  let r = emptyRegistry();
-  // un autre profil squatte deja le port derive de X
-  r = withServer(r, 'other', { port: derived, pid: 1, spawnedAt: 0 });
-  const p = pickPort(r, 'X');
-  expect(p, 'ne rend pas le port deja pris par un autre profil').not.toBe(derived);
-  expect(p >= PORT_BASE && p < PORT_BASE + PORT_SPAN).toBeTruthy();
-});
-
-test('property : pickPort ne rend jamais un port occupe par un autre profil', () => {
+test('property : une entree existante gagne TOUJOURS, quel que soit le port propose', () => {
   fc.assert(
     fc.property(
-      fc.array(fc.tuple(fc.string({ minLength: 1 }), fc.integer({ min: PORT_BASE, max: PORT_BASE + PORT_SPAN - 1 })), { maxLength: 8 }),
       fc.string({ minLength: 1 }),
-      (entries, target) => {
-        let r = emptyRegistry();
-        for (const [name, port] of entries) if (name !== target) r = withServer(r, name, { port, pid: 1, spawnedAt: 0 });
-        const chosen = pickPort(r, target);
-        // si le registre a une entree pour target on la reutilise ; sinon le port choisi est libre
-        if (serverEntry(r, target)) return true;
-        const usedByOthers = new Set(Object.entries(r.servers).filter(([n]) => n !== target).map(([, s]) => s.port));
-        // tolere la saturation (fallback documente) : seulement quand toute la plage est prise
-        return !usedByOthers.has(chosen) || usedByOthers.size >= PORT_SPAN;
+      fc.integer({ min: 1, max: 65535 }),
+      fc.integer({ min: 1, max: 65535 }),
+      (profile, enregistre, fresh) => {
+        const r = withServer(emptyRegistry(), profile, { port: enregistre, pid: 1, spawnedAt: 0 });
+        return pickPort(r, profile, fresh) === enregistre;
       }
     )
   );
+});
+
+test('pickPort : entree du profil au port NON-numerique => retombe sur le port alloue', () => {
+  // Entree corrompue/partielle (registre ecrit par une version cassee, disque abime) : on ne propage
+  // JAMAIS un port invalide dans un spawn — on repart d'un port neuf, valide par construction.
+  const reg = { servers: { v: { port: null, pid: 1, spawnedAt: 0, clients: {} } } };
+  expect(pickPort(reg, 'v', 55555)).toBe(55555);
+});
+
+test('robustesse : registre sans clef servers ne throw pas (pickPort/serverEntry)', () => {
+  expect(pickPort({}, 'x', 6001), 'pickPort tolere l absence de servers').toBe(6001);
+  expect(serverEntry({}, 'x')).toBeNull();
 });
 
 // ---------- heartbeat : idempotent, ajout/retrait ----------
@@ -173,7 +175,7 @@ test('property : reapDecision CONVERGE (rejouer sur kept => zero reap)', () => {
         let r = emptyRegistry();
         specs.forEach((s, i) => {
           const prof = s.profile + i; // profils uniques
-          r = withServer(r, prof, { port: PORT_BASE + i, pid: s.pid, spawnedAt: s.spawnedAt });
+          r = withServer(r, prof, { port: 9300 + i, pid: s.pid, spawnedAt: s.spawnedAt });
           s.heartbeats.forEach((h, j) => (r = withClient(r, prof, 'c' + j, h)));
         });
         const first = reapDecision(r, alive, now, ttl);
@@ -183,17 +185,6 @@ test('property : reapDecision CONVERGE (rejouer sur kept => zero reap)', () => {
       }
     )
   );
-});
-
-// ---------- tueurs de mutants (Stryker) : valeurs EXACTES + bornes ----------
-// Epingle le hash FNV-1a : toute mutation d'une constante/operateur du hash change ces ports => ROUGE.
-// (Valeurs scellees ; si PORT_BASE/SPAN change volontairement, ces attendus changent AVEC.)
-test('derivePort : valeurs EXACTES scellees (epingle le hash contre les mutations)', () => {
-  expect(derivePort('vegeta')).toBe(9639);
-  expect(derivePort('perso')).toBe(9698);
-  expect(derivePort('anon')).toBe(9507);
-  expect(derivePort('a')).toBe(9520);
-  expect(derivePort('')).toBe(9561);
 });
 
 test('reapDecision : borne <= ttl EXACTE (heartbeat pile a la limite = GARDE, +1 = reape)', () => {
@@ -224,36 +215,10 @@ test('reapDecision : pid MORT l emporte sur un heartbeat frais (raison = dead)',
   expect(reap[0].reason, 'dead prioritaire sur idle').toBe('dead');
 });
 
-test('pickPort : port non-numerique d un autre profil n est PAS considere occupe', () => {
-  // registre brut (bypass withServer) : un autre profil a un port invalide (null)
-  const reg = { servers: { other: { port: null, pid: 1, spawnedAt: 0, clients: {} } } };
-  expect(pickPort(reg, 'X'), 'port null ignore => X garde son port derive').toBe(derivePort('X'));
-});
-
-test('pickPort : sonde lineaire quand le port derive ET les suivants sont pris', () => {
-  const d = derivePort('Z');
-  let r = emptyRegistry();
-  r = withServer(r, 'o1', { port: d, pid: 1, spawnedAt: 0 });
-  r = withServer(r, 'o2', { port: d + 1, pid: 1, spawnedAt: 0 });
-  expect(pickPort(r, 'Z'), 'saute les 2 ports pris, prend le 3e').toBe(d + 2);
-});
-
 test('reapDecision : reason "idle" quand vivant mais sans client (hors grace)', () => {
   const r = withServer(emptyRegistry(), 'v', { port: 9300, pid: 7, spawnedAt: 0 });
   const { reap } = reapDecision(r, [7], 100000, 100);
   expect(reap[0].reason).toBe('idle');
-});
-
-// chaînage optionnel `registry.servers?.[...]` : sur un registre SANS clef `servers`, ne DOIT pas throw.
-test('robustesse : registre sans clef servers ne throw pas (pickPort/serverEntry/withClient/withoutClient)', () => {
-  expect(pickPort({}, 'x'), 'pickPort tolere l absence de servers').toBe(derivePort('x'));
-  expect(serverEntry({}, 'x')).toBe(null);
-  expect(withClient({}, 'x', 'c', 1), 'withClient no-op (aucun serveur)').toEqual({});
-  expect(withoutClient({}, 'x', 'c'), 'withoutClient no-op (aucun serveur)').toEqual({});
-});
-
-test('pickPort : sans entree pour le profil => port derive exact', () => {
-  expect(pickPort(emptyRegistry(), 'vegeta'), 'pas d entree => derive, pas undefined.port').toBe(9639);
 });
 
 test('withServer : PRESERVE les autres profils (pas un objet vide)', () => {
@@ -270,18 +235,6 @@ test('withoutClient : sur un profil SANS serveur => registre inchange (garde !s)
   r = withServer(r, 'v', { port: 9300, pid: 1, spawnedAt: 0 });
   const r2 = withoutClient(r, 'absent', 'c'); // profil 'absent' n a pas de serveur
   expect(r2, 'no-op exact').toEqual(r);
-});
-
-test('portsInUse : entree null d un autre profil ne throw pas et n occupe rien', () => {
-  const reg = { servers: { dead: null } }; // entree corrompue (null)
-  expect(pickPort(reg, 'x'), 'null ignore, pas de throw').toBe(derivePort('x'));
-});
-
-test('pickPort : entree du profil avec port NON-numerique => retombe sur le port derive (numerique)', () => {
-  const reg = { servers: { v: { port: 'oops', pid: 1, spawnedAt: 0, clients: {} } } };
-  const p = pickPort(reg, 'v');
-  expect(typeof p, 'port non-numerique ignore : on derive un vrai port').toBe('number');
-  expect(p).toBe(derivePort('v'));
 });
 
 test('withoutServer : PRESERVE les autres profils (retire seulement la cible)', () => {
@@ -328,6 +281,106 @@ test('property : un serveur garde est TOUJOURS soit vivant-de-pid soit en grace/
         const fresh = heartbeats.some((h) => now - h <= ttl);
         const grace = heartbeats.length === 0 && now - spawnedAt <= ttl;
         return aliveSet.has(pid) && (fresh || grace);
+      }
+    )
+  );
+});
+
+// ---------- WRITE-AHEAD : etat 'starting' (incident 2026-07-31) ----------
+// ⚠️ AJOUTE PAR /stack-audit : les property existantes ne creaient QUE des entrees 'ready'
+// (withServer par defaut) => le nouvel etat n'etait visite par AUCUNE property. Un mutant sur
+// `startStalled` ou sur la priorite des verdicts aurait donc SURVECU en silence.
+
+test('serverState : absent/inconnu = READY (retro-compat), seul "starting" fait STARTING', () => {
+  expect(serverState({}), 'champ absent = registre de la version precedente').toBe(STATE_READY);
+  expect(serverState(null)).toBe(STATE_READY);
+  expect(serverState({ state: 'nimportequoi' })).toBe(STATE_READY);
+  expect(serverState({ state: STATE_STARTING })).toBe(STATE_STARTING);
+});
+
+test('promoteServer : pose spawnedAt A LA PROMOTION et PRESERVE startedAt/clients', () => {
+  let r = withServer(emptyRegistry(), 'v', { port: 9300, pid: 7, startedAt: 100, state: STATE_STARTING });
+  r = withClient(r, 'v', 'c', 150);
+  const p = promoteServer(r, 'v', 500);
+  const s = serverEntry(p, 'v');
+  expect(serverState(s)).toBe(STATE_READY);
+  expect(s.spawnedAt, 'spawnedAt = instant de la PROMOTION (grace de boot inchangee)').toBe(500);
+  expect(s.startedAt, 'startedAt PRESERVE').toBe(100);
+  expect(s.clients.c, 'clients preserves').toBe(150);
+  expect(promoteServer(emptyRegistry(), 'absent', 1), 'no-op si aucune entree').toEqual(emptyRegistry());
+});
+
+test('reapDecision : "starting" DANS le budget est GARDEE (demarrage en cours legitime)', () => {
+  const r = withServer(emptyRegistry(), 'v', { port: 9300, pid: 7, startedAt: 900, state: STATE_STARTING });
+  expect(reapDecision(r, [7], 1000, 100, 100).reap.length, 'pile a la limite = gardee').toBe(0);
+});
+
+test('reapDecision : "starting" HORS budget => stuck-starting (JAMAIS dead ni idle)', () => {
+  const r = withServer(emptyRegistry(), 'v', { port: 9300, pid: 7, startedAt: 899, state: STATE_STARTING });
+  const { reap } = reapDecision(r, [7], 1000, 100, 100);
+  expect(reap.length).toBe(1);
+  expect(reap[0].reason, 'n a jamais demarre != a crashe').toBe('stuck-starting');
+});
+
+test('reapDecision : pid MORT prime sur stuck-starting (le fait I/O gagne toujours)', () => {
+  const r = withServer(emptyRegistry(), 'v', { port: 9300, pid: 7, startedAt: 0, state: STATE_STARTING });
+  expect(reapDecision(r, [], 100000, 100, 100).reap[0].reason).toBe('dead');
+});
+
+test('reapDecision : "starting" sans startedAt NUMERIQUE = morte-nee (jamais gardee a vie)', () => {
+  const reg = { servers: { v: { port: 9300, pid: 7, startedAt: null, state: STATE_STARTING, clients: {} } } };
+  expect(reapDecision(reg, [7], 50, 100000, 100000).reap[0].reason).toBe('stuck-starting');
+});
+
+test('property : reapDecision CONVERGE aussi avec des entrees "starting" melangees', () => {
+  fc.assert(
+    fc.property(
+      fc.array(
+        fc.record({
+          pid: fc.integer({ min: 1, max: 30 }),
+          startedAt: fc.integer({ min: 0, max: 10000 }),
+          spawnedAt: fc.integer({ min: 0, max: 10000 }),
+          starting: fc.boolean(),
+          heartbeats: fc.array(fc.integer({ min: 0, max: 10000 }), { maxLength: 3 }),
+        }),
+        { maxLength: 6 }
+      ),
+      fc.array(fc.integer({ min: 1, max: 30 }), { maxLength: 10 }),
+      fc.integer({ min: 0, max: 20000 }),
+      fc.integer({ min: 1, max: 5000 }),
+      fc.integer({ min: 1, max: 5000 }),
+      (specs, alive, now, ttl, startStale) => {
+        let r = emptyRegistry();
+        specs.forEach((s, i) => {
+          const prof = 'p' + i;
+          r = withServer(r, prof, {
+            port: 9300 + i, pid: s.pid, spawnedAt: s.spawnedAt, startedAt: s.startedAt,
+            state: s.starting ? STATE_STARTING : STATE_READY,
+          });
+          s.heartbeats.forEach((h, j) => (r = withClient(r, prof, 'c' + j, h)));
+        });
+        const first = reapDecision(r, alive, now, ttl, startStale);
+        const second = reapDecision(first.kept, alive, now, ttl, startStale);
+        return second.reap.length === 0; // convergence : rejouer ne reape plus rien
+      }
+    )
+  );
+});
+
+test('property : une entree GARDEE est soit ready-utile, soit starting-dans-le-budget — jamais autre', () => {
+  fc.assert(
+    fc.property(
+      fc.integer({ min: 1, max: 30 }), fc.integer({ min: 0, max: 10000 }), fc.boolean(),
+      fc.array(fc.integer({ min: 1, max: 30 }), { maxLength: 8 }),
+      fc.integer({ min: 0, max: 20000 }), fc.integer({ min: 1, max: 5000 }), fc.integer({ min: 1, max: 5000 }),
+      (pid, t, starting, alive, now, ttl, startStale) => {
+        let r = withServer(emptyRegistry(), 'v', {
+          port: 9300, pid, spawnedAt: t, startedAt: t, state: starting ? STATE_STARTING : STATE_READY,
+        });
+        const { kept } = reapDecision(r, alive, now, ttl, startStale);
+        if (!serverEntry(kept, 'v')) return true; // reapee : rien a prouver
+        if (!new Set(alive).has(pid)) return false; // un pid mort ne DOIT jamais etre garde
+        return starting ? now - t <= startStale : now - t <= ttl;
       }
     )
   );
