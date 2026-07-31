@@ -9,18 +9,25 @@
 //   4. ping              -> repond le proxy (robustesse meme backend KO)
 // Bidirectionnel : les requetes server->client d'un backend remontent a Claude (id mappe).
 
+import process from 'node:process';
 import { writeMessage } from './jsonrpc.js';
 import { log } from './logger.js';
 import { detectCollisions, canonicalInjectedName, exposedName, isOurToolCall } from './collision.js';
 import { alert } from './notify.js';
+import { withDeadline } from './deadline.js';
+import { clientBudgetMs, handshakeBudgetMs } from './budget.js';
 
 const PROTOCOL_FALLBACK = '2025-06-18';
 
 export class Router {
-  constructor(manager, clientOut, version = '1.0.0') {
+  // options.handshakeBudgetMs = borne d'attente du backend pour initialize/tools/list (INJECTABLE pour
+  // des tests rapides ; defaut prod = derive du budget du client, lu dans l'environnement).
+  constructor(manager, clientOut, version = '1.0.0', options = {}) {
     this.manager = manager;
     this.out = clientOut;
     this.version = version;
+    // ⚠️ Budget HERITE du client (MCP_TIMEOUT), jamais devine. cf budget.js pour les sources.
+    this._handshakeBudgetMs = options.handshakeBudgetMs ?? handshakeBudgetMs(clientBudgetMs(process.env));
     this._toBackend = new Map(); // proxyId -> {profile, backendId}  (requete backend->client en attente de reponse Claude)
     this._idCounter = 0;
     this._alertedCollisions = new Set(); // noms deja signales (anti-spam d'alerte sur chaque tools/list)
@@ -109,6 +116,13 @@ export class Router {
   }
 
   // ============ interceptions ============
+  // ⚠️ TOUTE reponse de handshake est BORNEE EN TEMPS (incident 2026-07-31). Avant, `initialize`
+  // attendait le backend SANS BORNE : le repli degrade ci-dessous existait deja, mais ne se declenchait
+  // que sur un REJET, jamais sur la LENTEUR. Un demarrage de ~40 s (terrain sale => spawn rate +
+  // self-heal + respawn) depassait donc le mur du client, qui raccrochait — et un serveur STDIO n'est
+  // JAMAIS reconnecte automatiquement par Claude Code (doc officielle) => session morte jusqu'a une
+  // action HUMAINE. NE JAMAIS retirer la borne : une reponse degradee se rattrape (tools/list_changed),
+  // une connexion perdue ne se rattrape pas.
   async _handleInitialize(msg) {
     const p = msg.params || {};
     this.manager.clientInfo = {
@@ -116,9 +130,11 @@ export class Router {
       capabilities: p.capabilities || {},
       clientInfo: p.clientInfo || { name: 'unknown', version: '0' },
     };
+    const pending = this.manager.active();
+    const raced = await withDeadline(pending, this._handshakeBudgetMs);
     let result;
-    try {
-      const b = await this.manager.active();
+    if (raced.ok) {
+      const b = raced.value;
       const caps = structuredClone(b.initResult?.capabilities || {});
       caps.tools = { ...(caps.tools || {}), listChanged: true }; // on garantit la propagation des updates
       result = {
@@ -127,32 +143,59 @@ export class Router {
         serverInfo: { name: 'pw-mcp-proxy', version: this.version, title: 'Playwright MCP multi-profil' },
         ...(b.initResult?.instructions ? { instructions: b.initResult.instructions } : {}),
       };
-    } catch (e) {
-      // Backend KO : on repond quand meme pour que la session vive (au moins switch_profile).
-      log('initialize: backend non pret: ' + e.message);
+    } else {
+      // Backend KO **ou trop lent** : on repond quand meme pour que la session VIVE (au moins
+      // switch_profile / restart_profile). Le demarrage se poursuit en arriere-plan.
+      log(`initialize: backend non pret sous ${this._handshakeBudgetMs}ms => reponse DEGRADEE (la session survit)`);
       result = {
         protocolVersion: this.manager.clientInfo.protocolVersion,
         capabilities: { tools: { listChanged: true } },
         serverInfo: { name: 'pw-mcp-proxy', version: this.version, title: 'Playwright MCP multi-profil' },
       };
+      this._refreshWhenReady(pending);
     }
     this._send({ jsonrpc: '2.0', id: msg.id, result });
   }
 
+  // Rattrapage d'une reponse degradee : quand le backend finit par etre pret, on force Claude a
+  // re-tirer tools/list. C'est ce qui rend le degrade INVISIBLE a l'usage (les outils apparaissent
+  // tout seuls). ⚠️ Le rejet est absorbe : cette promesse a deja perdu sa course, plus personne
+  // n'attend son resultat — la laisser rejeter nu tuerait le proxy en unhandledRejection tardif.
+  _refreshWhenReady(pending) {
+    pending.then(
+      () => this.notifyToolsChanged(),
+      () => {}
+    );
+  }
+
+  // Nos 3 tools maison. SITE UNIQUE de la liste : le chemin nominal et le chemin degrade la
+  // partageaient en double, donc ajouter un 4e tool maison demain n'aurait ete fait qu'a moitie.
+  _ourTools(collisions = []) {
+    return [this._switchTool(collisions), this._currentProfileTool(collisions), this._restartTool(collisions)];
+  }
+
+  // ⚠️ BORNE EN TEMPS comme initialize (meme raison, cf _handleInitialize) : tools/list attend le
+  // backend, ET la doc officielle Claude Code precise qu'un timeout sur les requetes de decouverte
+  // (tools/list...) n'est PAS retente. Une reponse lente serait donc perdue sans rattrapage.
   async _handleToolsList(msg) {
-    try {
+    // Sequence complete sous UNE seule echeance : demarrage du backend PUIS aspiration de ses tools
+    // (deux attentes, un seul budget — c'est le temps total que le client mesure, pas les etapes).
+    const pending = (async () => {
       const b = await this.manager.active();
-      const tools = await this._collectBackendTools(b);
-      const collisions = this._checkCollisions(tools);
-      tools.push(this._switchTool(collisions));
-      tools.push(this._currentProfileTool(collisions));
-      tools.push(this._restartTool(collisions));
-      this._send({ jsonrpc: '2.0', id: msg.id, result: { tools } });
-    } catch (e) {
-      log('tools/list degrade (backend KO): ' + e.message);
-      // backend KO => aucun tool backend connu => aucune collision possible => noms nus.
-      this._send({ jsonrpc: '2.0', id: msg.id, result: { tools: [this._switchTool([]), this._currentProfileTool([]), this._restartTool([])] } });
+      return this._collectBackendTools(b);
+    })();
+    const raced = await withDeadline(pending, this._handshakeBudgetMs);
+    if (!raced.ok) {
+      // Backend KO **ou trop lent** => aucun tool backend connu => aucune collision possible => noms nus.
+      // Degrade RATTRAPABLE : des que le backend repond, tools/list_changed relance Claude (cf ci-dessous).
+      log(`tools/list degrade (backend non pret sous ${this._handshakeBudgetMs}ms)`);
+      this._refreshWhenReady(pending);
+      return this._send({ jsonrpc: '2.0', id: msg.id, result: { tools: this._ourTools([]) } });
     }
+    const tools = raced.value;
+    const collisions = this._checkCollisions(tools);
+    tools.push(...this._ourTools(collisions));
+    this._send({ jsonrpc: '2.0', id: msg.id, result: { tools } });
   }
 
   // Garde anti-collision : detecte un tool backend homonyme d'un de nos tools maison.

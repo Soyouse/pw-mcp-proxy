@@ -15,6 +15,8 @@ export default defineConfig({
       'tests/log-rotate.test.js',
       'tests/auto-restart.test.js',
       'tests/freeze-report.test.js',
+      'tests/budget.test.js',
+      'tests/deadline.test.js',
     ],
     globals: false,
   },
