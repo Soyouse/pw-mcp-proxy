@@ -7,23 +7,27 @@ import { test, expect } from 'vitest';
 import fc from 'fast-check';
 import path from 'node:path';
 import os from 'node:os';
-import { channelName, encodeProfile, channelIsFile, runtimeDir, SUN_PATH_MAX } from '../src/channel-name.js';
+import { channelName, encodeProfile, channelIsFile, runtimeDir, userSegment, SUN_PATH_MAX } from '../src/channel-name.js';
 
-const WIN = { platform: 'win32' };
-const NIX = { platform: 'linux', tmpdir: '/tmp' };
+// ⚠️ `userInfo` INJECTE : sur un repo PUBLIC, un test ne doit JAMAIS dependre du compte qui le
+// lance (il passerait chez l'auteur et casserait chez un contributeur). Le segment utilisateur est
+// verifie separement, avec des valeurs explicites.
+const U = { username: 'u' };
+const WIN = { platform: 'win32', userInfo: U };
+const NIX = { platform: 'linux', tmpdir: '/tmp', userInfo: U };
 
 test('Windows : named pipe dans l espace de noms dedie', () => {
-  expect(channelName('vegeta', WIN)).toBe('\\\\.\\pipe\\pw-mcp-vegeta');
+  expect(channelName('vegeta', WIN)).toBe('\\\\.\\pipe\\pw-mcp-u-vegeta');
 });
 
 test('POSIX : socket de domaine Unix dans tmpdir', () => {
-  expect(channelName('vegeta', NIX)).toBe(path.join('/tmp', 'pw-mcp-vegeta.sock'));
+  expect(channelName('vegeta', NIX)).toBe(path.join('/tmp', 'pw-mcp-u-vegeta.sock'));
 });
 
 test('le nom se DERIVE du profil : ajouter une identite ne demande aucune table', () => {
   // 3 profils au 01/08/2026, le nombre est NON BORNE : chaque nom sort du profil, point.
   for (const p of ['vegeta', 'perso', 'client-42', 'un-profil-ajoute-demain']) {
-    expect(channelName(p, WIN)).toBe(`\\\\.\\pipe\\pw-mcp-${p}`);
+    expect(channelName(p, WIN)).toBe(`\\\\.\\pipe\\pw-mcp-u-${p}`);
   }
 });
 
@@ -62,7 +66,7 @@ test('POSIX : chemin trop long ⇒ ERREUR EXPLICITE, jamais une troncature silen
 });
 
 test('POSIX : juste sous la limite ⇒ accepte (la borne n est pas trop stricte)', () => {
-  const base = Buffer.byteLength(path.join('/tmp', 'pw-mcp-.sock'), 'utf8');
+  const base = Buffer.byteLength(path.join('/tmp', 'pw-mcp-u-.sock'), 'utf8');
   const ok = 'x'.repeat(SUN_PATH_MAX - base);
   expect(Buffer.byteLength(channelName(ok, NIX), 'utf8')).toBeLessThanOrEqual(SUN_PATH_MAX);
 });
@@ -86,6 +90,23 @@ test('POSIX : repli sur tmpdir si XDG absent ou relatif (defaut connu, pas une e
 
 test('Windows : XDG ignore (les named pipes ne sont pas des fichiers)', () => {
   expect(runtimeDir('win32', { XDG_RUNTIME_DIR: '/run/user/1000' })).toBe(os.tmpdir());
+});
+
+test('ISOLATION PAR UTILISATEUR : deux comptes ne partagent JAMAIS un canal', () => {
+  // Doc officielle Microsoft : l'espace de noms des named pipes est GLOBAL a la machine, sans
+  // isolation par session. Sans ce segment, deux comptes Windows avec le meme profil se bloquent.
+  const a = channelName('vegeta', { platform: 'win32', userInfo: { username: 'alice' } });
+  const b = channelName('vegeta', { platform: 'win32', userInfo: { username: 'bob' } });
+  expect(a).not.toBe(b);
+  expect(a).toContain('alice');
+});
+
+test('userSegment : nom d utilisateur exotique encode, jamais brut', () => {
+  // Un compte Windows peut s'appeler `DOMAINE\Jean Dupont` : sans encodage, le `\` casserait
+  // le nom du pipe et l'espace le rendrait ambigu.
+  expect(encodeProfile(userSegment({ username: 'Jean Dupont' }))).toBe('Jean%20Dupont');
+  expect(userSegment({ username: '' })).toBe('anon');
+  expect(userSegment({ username: null })).toBe('anon');
 });
 
 test('channelIsFile : POSIX oui (survit au crash), Windows non (le noyau detruit)', () => {

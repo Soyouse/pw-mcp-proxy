@@ -21,6 +21,32 @@ import os from 'node:os';
 // Prefixe commun : identifie NOS canaux sans ambiguite dans l'espace de noms de la machine.
 const PREFIX = 'pw-mcp-';
 
+/**
+ * Segment identifiant l'UTILISATEUR, insere dans le nom du canal.
+ *
+ * ⚠️ POURQUOI (doc officielle Microsoft, « Named Pipe Security and Access Rights ») : sur Windows,
+ *    TOUS les named pipes vivent dans UN SEUL espace de noms GLOBAL a la machine — il n'y a pas
+ *    d'isolation par session. Sans ce segment, deux comptes Windows utilisant le meme nom de profil
+ *    entrent en COLLISION : l'un empeche l'autre de lancer son serveur. Sur POSIX le probleme ne se
+ *    pose qu'au repli sur /tmp (XDG_RUNTIME_DIR est deja par-utilisateur), mais on applique la meme
+ *    regle PARTOUT : une regle uniforme ne peut pas etre oubliee sur une plateforme.
+ * ⚠️ CECI N'EST PAS UNE MESURE DE SECURITE. Le DACL par defaut d'un named pipe accorde la LECTURE
+ *    a Everyone, et Node n'expose aucun moyen de passer un security descriptor a `listen()`. Un
+ *    autre utilisateur local peut donc toujours lire le port publie. Ce n'est PAS une regression :
+ *    le serveur @playwright/mcp ecoute deja sur la loopback SANS authentification, il etait donc
+ *    deja joignable par tout utilisateur local. NE PAS presenter ce segment comme une protection.
+ * ⚠️ Repli sur 'anon' si l'utilisateur est illisible (conteneur sans passwd) : mieux vaut un canal
+ *    partage qu'aucun canal — mais c'est un DEFAUT CONNU, pas un cas nominal.
+ */
+export function userSegment(info = null) {
+  try {
+    const u = (info || os.userInfo()).username;
+    return typeof u === 'string' && u !== '' ? u : 'anon';
+  } catch {
+    return 'anon'; // os.userInfo() JETTE quand l'uid n'a pas d'entree passwd (conteneurs)
+  }
+}
+
 // Longueur max du chemin d'une socket de domaine Unix (`sun_path`) : 108 octets sur Linux,
 // 104 sur macOS/BSD. On prend la borne la PLUS BASSE, moins le terminateur NUL.
 // ⚠️ Depasser ne donne PAS une erreur claire : le noyau TRONQUE ou rend EINVAL selon la plateforme.
@@ -85,9 +111,13 @@ export function channelName(profile, env = {}) {
   const enc = encodeProfile(profile);
   if (enc === '') throw new Error('channelName: nom de profil vide');
 
+  // ⚠️ Segment UTILISATEUR obligatoire sur les DEUX plateformes (cf `userSegment`) : sur Windows
+  // l'espace de noms des pipes est GLOBAL a la machine, donc deux comptes se marcheraient dessus.
+  const who = encodeProfile(userSegment(env.userInfo || null));
+
   if (platform === 'win32') {
     // Espace de noms des named pipes : jamais de chemin de fichier, jamais de limite sun_path.
-    return `\\\\.\\pipe\\${PREFIX}${enc}`;
+    return `\\\\.\\pipe\\${PREFIX}${who}-${enc}`;
   }
 
   // ⚠️ `$XDG_RUNTIME_DIR` AVANT `os.tmpdir()`, et ce n'est PAS un detail de confort :
@@ -100,7 +130,7 @@ export function channelName(profile, env = {}) {
   // corrige AUSSI le fait qu'une socket dans /tmp est lisible par les autres utilisateurs locaux.
   // ⚠️ `env.tmpdir` reste prioritaire : c'est l'injection des TESTS, jamais un chemin de prod.
   const dir = env.tmpdir || runtimeDir(platform);
-  const full = path.join(dir, `${PREFIX}${enc}.sock`);
+  const full = path.join(dir, `${PREFIX}${who}-${enc}.sock`);
   if (Buffer.byteLength(full) > SUN_PATH_MAX) {
     // ⚠️ FAILS-CLOSED. NE PAS "resoudre" en hachant le nom : un hash reintroduit la collision,
     // donc le partage de navigateur entre deux identites. Renommer le profil est la bonne reponse.
