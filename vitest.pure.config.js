@@ -18,6 +18,7 @@ export default defineConfig({
       'tests/budget.test.js',
       'tests/deadline.test.js',
       'tests/error-detail.test.js',
+      'tests/channel-name.test.js',
     ],
     globals: false,
   },
