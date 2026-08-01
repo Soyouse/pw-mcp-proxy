@@ -244,19 +244,35 @@ export class Supervisor {
   // ⚠️ Entree SANS identite = registre ecrit AVANT cette migration (2026-08-01). On tue alors comme
   //    avant, en le TRACANT : refuser ferait fuir des orphelins a vie chez tout utilisateur existant.
   //    Cas transitoire par construction — toute entree neuve porte son identite.
+  // Rend un verdict a TROIS etats — la distinction est VITALE (regression introduite puis corrigee
+  // le 2026-08-02) :
+  //   'killed'   : c'etait bien notre process, il est mort ⇒ l'appelant retire l'entree.
+  //   'not-ours' : identite LUE et DIFFERENTE ⇒ notre serveur est mort et son pid a ete recycle.
+  //                On ne tue pas, mais l'entree doit disparaitre (elle ne designe plus rien a nous).
+  //   'unknown'  : identite ILLISIBLE (PowerShell indisponible, machine saturee, /proc refuse).
+  //                ⇒ ⚠️ L'APPELANT DOIT GARDER L'ENTREE. Sans preuve, on n'a ni tue ni disculpe :
+  //                effacer la trace laisserait un process VIVANT et INCONNU DE TOUS — il tiendrait
+  //                le port et le lock --user-data-dir, ferait echouer les spawns suivants, et on
+  //                retomberait sur la panne METASTABLE du 31/07 (taskkill humain). Le doute se
+  //                REPORTE au prochain reap, il ne se resout jamais par un effacement.
+  //                (Declencheur REEL, pas theorique : la loopback de cette machine a decroche sous
+  //                charge le 2026-08-02, faisant echouer les appels PowerShell.)
   _killIfOurs(pid, identity, what) {
     if (identity) {
       const now = processIdentity(pid);
+      if (!now) {
+        log(`[supervisor] ${what}: pid=${pid} identite ILLISIBLE — ni tue ni oublie, on reessaiera`);
+        return 'unknown';
+      }
       if (!safeToKill(identity, now)) {
-        // Ni « mort », ni « a nous » : dans les deux cas, NE PAS TUER. Absence de preuve = abstention.
-        log(`[supervisor] ${what}: pid=${pid} NON tue — identite differente (PID recycle) ou illisible`);
-        return false;
+        log(`[supervisor] ${what}: pid=${pid} NON tue — PID RECYCLE (ce process n'est pas le notre)`);
+        return 'not-ours';
       }
     } else {
       log(`[supervisor] ${what}: pid=${pid} tue SANS verification d'identite (entree d'avant 2026-08-01)`);
     }
     try { treeKill(pid); } catch (e) { log(`[supervisor] ${what}: treeKill pid=${pid} — ${describeError(e)}`); }
-    return true;
+    return 'killed';
   }
 
   // ---------- readiness ----------
@@ -465,8 +481,10 @@ export class Supervisor {
         // startStaleMs() = budget au-dela duquel une entree 'starting' jamais promue est morte-nee.
         // C'est CE parametre qui rend l'orphelin du 31/07 tuable AUTOMATIQUEMENT (0-human).
         const { reap, kept } = reapDecision(reg, alive, Date.now(), this.ttl, startStaleMs());
+        const doute = []; // entrees dont l'identite n'a PAS pu etre lue : a CONSERVER
         for (const r of reap) {
-          this._killIfOurs(r.pid, (reg.servers || {})[r.profile]?.identity, `reap ${r.reason}`);
+          const verdict = this._killIfOurs(r.pid, (reg.servers || {})[r.profile]?.identity, `reap ${r.reason}`);
+          if (verdict === 'unknown') { doute.push(r.profile); continue; } // ni alerte ni retrait
           log(`[supervisor] reap ${r.profile} (${r.reason}) pid=${r.pid} port=${r.port}`);
           // ⚠️ Dead-man (doctrine « crier quand ca meurt ») : un serveur DEAD = mort INATTENDUE (crash)
           // vs 'idle' = fin de vie NORMALE (plus de client). On alerte UNIQUEMENT le crash pour reperer
@@ -479,7 +497,14 @@ export class Supervisor {
             alert(`serveur @playwright/mcp du profil "${r.profile}" MORT inopinement (pid=${r.pid}, port=${r.port}) — reape. Verifier un crash en boucle.`, this.ntfyUrl);
           }
         }
-        if (reap.length) this._write(kept);
+        // ⚠️ Les entrees en DOUTE sont REINJECTEES telles quelles : `reapDecision` (pur) les avait
+        // retirees, mais lui ne sait pas que la lecture d'identite a echoue. Ne JAMAIS simplifier en
+        // ecrivant `kept` directement — ce serait perdre de vue un process potentiellement vivant.
+        if (reap.length) {
+          let out = kept;
+          for (const p of doute) out = withServer(out, p, reg.servers[p]);
+          this._write(out);
+        }
       });
     } catch (e) {
       log(`[supervisor] reap rate: ${describeError(e)}`);

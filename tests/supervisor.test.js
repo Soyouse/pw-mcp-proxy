@@ -157,6 +157,35 @@ test('PID RECYCLE : le reap REFUSE de tuer un process qui n est plus le notre', 
   expect(isPidAlive(entry.pid), 'process EPARGNE : absence de preuve = pas de kill').toBe(true);
 });
 
+test('IDENTITE ILLISIBLE : ni tue, ni OUBLIE (pas d orphelin invisible)', async () => {
+  // Regression introduite le 2026-08-01 (verdict binaire) et corrigee le 2026-08-02.
+  // Quand la lecture d'identite ECHOUE (PowerShell indisponible, machine saturee — c'est
+  // ARRIVE reellement le 02/08, la loopback ayant decroche), l'ancien code ne tuait pas MAIS
+  // retirait quand meme l'entree ⇒ process VIVANT et INCONNU DE TOUS ⇒ il tient le port et le
+  // lock --user-data-dir ⇒ panne METASTABLE du 31/07 (qui avait exige un taskkill humain).
+  //
+  // Le doute doit se REPORTER, jamais se resoudre par un effacement.
+  const P = prof();
+  const sup = newSup({ ttl: 1, clientId: 'illisible' });
+  await sup.ensureServer(P, SPEC);
+  const entry = serverEntry(readReg(sup), P);
+
+  // Simule une lecture d'identite impossible (le seul point d'I/O concerne).
+  const vraie = sup._killIfOurs.bind(sup);
+  sup._killIfOurs = () => 'unknown';
+
+  await new Promise((r) => setTimeout(r, 20));
+  await sup.reap();
+
+  expect(serverEntry(readReg(sup), P), 'entree CONSERVEE : on ne perd jamais un process de vue').toBeTruthy();
+  expect(isPidAlive(entry.pid), 'process epargne (aucune preuve qu il soit a nous)').toBe(true);
+
+  // Le doute leve, le reap suivant fait son travail : le report n'est pas un abandon.
+  sup._killIfOurs = vraie;
+  await sup.reap();
+  expect(serverEntry(readReg(sup), P), 'retire une fois l identite lisible').toBe(null);
+});
+
 test('reap : serveur AVEC heartbeat frais est GARDE', async () => {
   const P = prof();
   const sup = newSup({ ttl: 60000, clientId: 'live' });
