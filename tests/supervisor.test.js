@@ -11,6 +11,7 @@ import { Supervisor } from '../src/supervisor.js';
 import { isPidAlive } from '../src/prockill.js';
 import { serverEntry } from '../src/server-registry.js';
 import { taggedArgs } from './harness.js'; // ⚠️ marque les serveurs spawnés par le CODE => ratchet anti-fuite
+import { acquireLaunchChannel } from '../src/launch-channel.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FAKE = path.join(__dirname, 'fixtures', 'fake-http-server.js');
@@ -92,21 +93,33 @@ test('ensureServer concurrent (2 proxys en parallele) => UN SEUL serveur', async
   expect(entry && isPidAlive(entry.pid)).toBeTruthy();
 });
 
-test('verrou PERIME + 2 proxys concurrents => vol serialise, UN SEUL serveur', async () => {
-  // Ancrage empirique (trace) du protocole prouve par spec/SupervisorLock.tla (config Fixed) :
-  // on seme un verrou PERIME (proxy mort en le tenant), puis 2 proxys foncent en meme temps.
-  // Le vol serialise (meta-verrou + re-verif) DOIT garantir UN SEUL serveur (pas de double spawn).
+test('LANCEUR MORT + 2 proxys concurrents => UN SEUL serveur, sans aucun vol de verrou', async () => {
+  // REMPLACE l'ancien test « verrou PERIME + vol serialise » (supprime avec le verrou fichier).
+  // Ce scenario est celui qui a produit la panne de ~5 h du 31/07→01/08 : un detenteur disparu,
+  // et des concurrents qui devaient DEVINER que le verrou etait mort pour le voler.
+  //
+  // ⚠️ Avec le canal nomme, la situation testee ici n'a plus d'equivalent « perime » : le noyau
+  //    detruit le canal a la mort du processus, donc un detenteur fantome ne peut PAS exister.
+  //    Il n'y a plus ni peremption, ni vol, ni meta-verrou — donc plus rien a serialiser a la main.
+  //    Ce test prouve que la CLASSE DE PANNE a disparu, pas seulement que le bug est corrige.
   const P = prof();
   const a = newSup({ clientId: 'A' });
   const b = newSup({ clientId: 'B' });
-  fs.writeFileSync(a.lockPath, '999999'); // pid bidon d'un "proxy mort" tenant le verrou
-  const old = Date.now() / 1000 - 120; // mtime vieux de 120s > LOCK_STALE_MS (60s) => perime
-  fs.utimesSync(a.lockPath, old, old);
+
+  // Un lanceur precedent prend le canal puis MEURT (close = disparition du processus cote noyau).
+  const zombie = await acquireLaunchChannel(P);
+  expect(zombie.role).toBe('leader');
+  zombie.close();
+
+  // Les deux proxys foncent en meme temps sur un canal qui vient d'etre libere.
   const [u1, u2] = await Promise.all([a.ensureServer(P, SPEC), b.ensureServer(P, SPEC)]);
-  expect(u1, 'verrou perime vole SANS course : une seule URL').toBe(u2);
+  expect(u1, 'course serialisee par le noyau : une seule URL').toBe(u2);
   const entry = serverEntry(readReg(a), P);
   expect(entry && isPidAlive(entry.pid), 'un seul serveur vivant enregistre').toBeTruthy();
-  expect(fs.existsSync(a.lockPath), 'verrou relache a la fin (perime vole puis libere)').toBe(false);
+
+  // ⚠️ Le VERROU FICHIER n'est plus touche du tout par ensureServer : sa seule absence de creation
+  // est la preuve que le chemin de lancement ne repose plus dessus.
+  expect(fs.existsSync(a.lockPath), 'plus aucun verrou fichier sur le chemin de lancement').toBe(false);
 });
 
 test('reap : serveur SANS client vivant (ttl court) est tue et retire', async () => {

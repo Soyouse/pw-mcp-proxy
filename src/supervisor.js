@@ -54,6 +54,7 @@ import { resolveShellSpawn } from './spawn-cmd.js';
 import { alert } from './notify.js';
 import { log } from './logger.js';
 import { describeError } from './error-detail.js';
+import { acquireLaunchChannel } from './launch-channel.js';
 
 // ⚠️ Host / DNS-rebinding : on suit la CONFIGURATION DOCUMENTÉE par Microsoft (skill playwright-mcp-api,
 // playwright.dev/mcp/configuration/options), sans rien rétro-ingénierer :
@@ -188,6 +189,47 @@ export class Supervisor {
     try { return await fn(); } finally { this._unlock(); }
   }
 
+  // ---------- section critique de LANCEMENT : canal nomme (remplacant du verrou fichier) ----------
+  // ⚠️ REMPLACE `_withLock` (incident 31/07→01/08 : verrou SATURE, pas orphelin). Le noyau detruit
+  // le canal a la mort du processus ⇒ aucun verrou ne peut plus « rester coince », donc plus aucune
+  // attente, plus aucune peremption, plus aucun vol. Toutes les questions posees ici sont LOCALES et
+  // le noyau y repond EXACTEMENT — il n'y a pas un seul delai dans ce chemin.
+  //
+  // Deux issues, toutes deux terminales (aucune boucle d'attente) :
+  //   LANCEUR : j'execute la section critique, je publie le port, je libere le canal.
+  //   SUIVEUR : un autre lance deja ; il m'a publie un port DEJA PROUVE JOIGNABLE ⇒ je l'utilise.
+  //
+  // ⚠️ Le lanceur ne publie QU'APRES readiness prouvee ⇒ un port recu par un suiveur n'est jamais
+  //    une promesse, c'est un fait. NE PAS deplacer `publish` avant le poll.
+  async _withLaunchChannel(profile, fn) {
+    const channel = await acquireLaunchChannel(profile);
+
+    if (channel.role === 'follower') {
+      // Le port vient d'un lanceur qui a DEJA prouve la readiness. On le confirme quand meme :
+      // le serveur a pu mourir entre la publication et maintenant (fait observable, pas suppose).
+      if (await this._probeReady(channel.port)) {
+        log(`[supervisor:${profile}] serveur adopte via canal port=${channel.port}`);
+        return this.urlFor(channel.port);
+      }
+      // ⚠️ Anomalie REELLE, jamais un simple reessai : le lanceur a annonce un port joignable qui ne
+      // l'est plus. On echoue BRUYAMMENT plutot que de boucler (une boucle ici recreerait exactement
+      // la contention du 01/08). L'appelant (manager.get) refera un cycle propre.
+      throw new Error(
+        `serveur ${profile} : port ${channel.port} publie par le lanceur mais deja injoignable ` +
+          `(le serveur est mort juste apres son demarrage — consulter le log du backend)`
+      );
+    }
+
+    try {
+      return await fn(channel);
+    } finally {
+      // ⚠️ Liberation EXPLICITE au cas nominal ; mais la correction n'en depend PAS : sur un crash,
+      // le noyau libere le canal lui-meme. C'est toute la difference avec le verrou fichier, dont
+      // la liberation dependait d'un nettoyage volontaire (et donc echouait quand ca allait mal).
+      channel.close();
+    }
+  }
+
   // ---------- readiness ----------
   urlFor(port) {
     return `http://${URL_HOST}:${port}/mcp`; // client via localhost (Host header allowlisté)
@@ -232,11 +274,14 @@ export class Supervisor {
     const fast = serverEntry(this._read(), profile);
     if (fast && isPidAlive(fast.pid) && (await this._probeReady(fast.port))) return this.urlFor(fast.port);
 
-    return this._withLock(async () => {
+    return this._withLaunchChannel(profile, async (channel) => {
       let reg = this._read();
       let entry = serverEntry(reg, profile);
       // Re-verifie sous verrou (un autre proxy a pu gagner la course pendant l'attente du lock).
-      if (entry && isPidAlive(entry.pid) && (await this._probeReady(entry.port))) return this.urlFor(entry.port);
+      if (entry && isPidAlive(entry.pid) && (await this._probeReady(entry.port))) {
+        channel.publish(entry.port); // serveur ADOPTE : les suiveurs sont servis sans re-sonder
+        return this.urlFor(entry.port);
+      }
 
       // Entree morte : on la purge (tree-kill best-effort si le pid traine encore).
       if (entry) {
@@ -285,6 +330,10 @@ export class Supervisor {
       let out = promoteServer(this._read(), profile, Date.now());
       out = withClient(out, profile, this.clientId, Date.now()); // je m'enregistre immediatement
       this._write(out);
+      // ⚠️ PUBLICATION APRES readiness PROUVEE, jamais avant : un suiveur qui recoit un port le
+      // considere JOIGNABLE par construction. Publier un port « en cours » rendrait le suiveur
+      // porteur d'une inference — exactement ce qu'on supprime.
+      channel.publish(this._lastPort);
       log(`[supervisor:${profile}] serveur pret pid=${pid} ${this.urlFor(this._lastPort)}`);
       return this.urlFor(this._lastPort);
     });
