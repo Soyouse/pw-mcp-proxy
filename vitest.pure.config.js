@@ -19,6 +19,7 @@ export default defineConfig({
       'tests/deadline.test.js',
       'tests/error-detail.test.js',
       'tests/channel-name.test.js',
+      'tests/proc-identity-pure.test.js',
     ],
     globals: false,
   },

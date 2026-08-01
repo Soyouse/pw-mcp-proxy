@@ -4,7 +4,7 @@
   "packageManager": "npm",
   "testRunner": "vitest",
   "vitest": { "configFile": "vitest.pure.config.js" },
-  "mutate": ["src/collision.js", "src/prockill-pure.js", "src/spec.js", "src/server-registry.js", "src/sse-parse.js", "src/spawn-cmd.js", "src/log-rotate.js", "src/auto-restart.js", "src/freeze-report.js", "src/budget.js", "src/deadline.js", "src/error-detail.js", "src/channel-name.js"],
+  "mutate": ["src/collision.js", "src/prockill-pure.js", "src/spec.js", "src/server-registry.js", "src/sse-parse.js", "src/spawn-cmd.js", "src/log-rotate.js", "src/auto-restart.js", "src/freeze-report.js", "src/budget.js", "src/deadline.js", "src/error-detail.js", "src/channel-name.js", "src/proc-identity-pure.js"],
   "reporters": ["clear-text", "progress"],
   "coverageAnalysis": "perTest",
   "concurrency": 4,

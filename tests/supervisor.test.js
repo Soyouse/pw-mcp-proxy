@@ -133,6 +133,30 @@ test('reap : serveur SANS client vivant (ttl court) est tue et retire', async ()
   expect(await waitFor(async () => !isPidAlive(entry.pid)), 'process tue (tree-kill)').toBeTruthy();
 });
 
+test('PID RECYCLE : le reap REFUSE de tuer un process qui n est plus le notre', async () => {
+  // LA faille du 2026-08-01 (trouvee par simulation, degats HORS perimetre du projet) : un PID est
+  // un numero reutilisable. Sur une machine qui tourne des semaines, celui d'un serveur mort est
+  // reattribue — et `treeKill(entry.pid)` tuait alors le process de QUELQU'UN D'AUTRE.
+  //
+  // On reproduit exactement ca : un pid VIVANT dont l'identite enregistree ne correspond plus
+  // (c'est la signature d'un recyclage). Le reap DOIT s'abstenir.
+  const P = prof();
+  const sup = newSup({ ttl: 1, clientId: 'recycle' }); // ttl=1ms => le reap voudra le tuer
+  await sup.ensureServer(P, SPEC);
+  const entry = serverEntry(readReg(sup), P);
+  expect(isPidAlive(entry.pid), 'serveur bien demarre').toBe(true);
+
+  // Le pid reste vivant, mais l'identite enregistree devient celle d'un AUTRE process.
+  const reg = readReg(sup);
+  reg.servers[P].identity = 'identite-d-un-process-disparu';
+  fs.writeFileSync(sup.registryPath, JSON.stringify(reg));
+
+  await new Promise((r) => setTimeout(r, 20)); // depasse le ttl : le reap le considere idle
+  await sup.reap();
+
+  expect(isPidAlive(entry.pid), 'process EPARGNE : absence de preuve = pas de kill').toBe(true);
+});
+
 test('reap : serveur AVEC heartbeat frais est GARDE', async () => {
   const P = prof();
   const sup = newSup({ ttl: 60000, clientId: 'live' });

@@ -50,6 +50,8 @@ import {
 } from './budget.js';
 import { allocateEphemeralPort } from './port-alloc.js';
 import { treeKill, isPidAlive, sweepByCmd } from './prockill.js';
+import { processIdentity } from './proc-identity.js';
+import { safeToKill } from './proc-identity-pure.js';
 import { resolveShellSpawn } from './spawn-cmd.js';
 import { alert } from './notify.js';
 import { log } from './logger.js';
@@ -230,6 +232,33 @@ export class Supervisor {
     }
   }
 
+  // ---------- garde anti-recyclage de PID ----------
+  // ⚠️ UN PID EST UN NUMERO REUTILISABLE, PAS UNE IDENTITE (`pid_max` = 32768 par defaut sous Linux).
+  // Sur une machine qui tourne des semaines, le PID d'un serveur mort finit REATTRIBUE a un process
+  // tiers. Sans cette garde, `treeKill(entry.pid)` finit par TUER LE PROCESS DE QUELQU'UN D'AUTRE —
+  // la seule faute du projet dont les degats sortent de son perimetre. Faille trouvee par simulation
+  // le 2026-08-01 (jamais observee, mais CERTAINE a terme).
+  //
+  // ⚠️ Cout MESURE : ~650 ms sur Windows (CIM), quasi nul sur Linux (/proc). Donc on ne verifie
+  //    QU'AVANT DE TUER, jamais dans le chemin chaud (la readiness reste prouvee par la sonde HTTP).
+  // ⚠️ Entree SANS identite = registre ecrit AVANT cette migration (2026-08-01). On tue alors comme
+  //    avant, en le TRACANT : refuser ferait fuir des orphelins a vie chez tout utilisateur existant.
+  //    Cas transitoire par construction — toute entree neuve porte son identite.
+  _killIfOurs(pid, identity, what) {
+    if (identity) {
+      const now = processIdentity(pid);
+      if (!safeToKill(identity, now)) {
+        // Ni « mort », ni « a nous » : dans les deux cas, NE PAS TUER. Absence de preuve = abstention.
+        log(`[supervisor] ${what}: pid=${pid} NON tue — identite differente (PID recycle) ou illisible`);
+        return false;
+      }
+    } else {
+      log(`[supervisor] ${what}: pid=${pid} tue SANS verification d'identite (entree d'avant 2026-08-01)`);
+    }
+    try { treeKill(pid); } catch (e) { log(`[supervisor] ${what}: treeKill pid=${pid} — ${describeError(e)}`); }
+    return true;
+  }
+
   // ---------- readiness ----------
   urlFor(port) {
     return `http://${URL_HOST}:${port}/mcp`; // client via localhost (Host header allowlisté)
@@ -285,7 +314,7 @@ export class Supervisor {
 
       // Entree morte : on la purge (tree-kill best-effort si le pid traine encore).
       if (entry) {
-        if (isPidAlive(entry.pid)) { try { treeKill(entry.pid); } catch {} }
+        if (isPidAlive(entry.pid)) this._killIfOurs(entry.pid, entry.identity, 'purge entree morte');
         reg = withoutServer(reg, profile);
         this._write(reg);
       }
@@ -378,7 +407,10 @@ export class Supervisor {
     // suivante, le reaper de n'importe quel autre agent le verra et le tuera (plus d'orphelin invisible).
     // ⚠️ `startedAt` (instant du spawn), PAS `spawnedAt` : ce dernier est pose a la PROMOTION, donc la
     // grace de boot du reaper reste calculee exactement comme avant le write-ahead (zero regression).
-    this._write(withServer(this._read(), profile, { port, pid, startedAt: Date.now(), state: STATE_STARTING }));
+    // ⚠️ IDENTITE CAPTUREE ICI, au plus pres du spawn : c'est le seul instant ou l'on SAIT que ce pid
+    // est bien le notre. Toute lecture ulterieure sera comparee a celle-ci avant un kill.
+    const identity = processIdentity(pid);
+    this._write(withServer(this._read(), profile, { port, pid, identity, startedAt: Date.now(), state: STATE_STARTING }));
     if (await this._pollReady(port, budgetMs)) return pid;
     try { treeKill(pid); } catch {}
     // Tentative RATEE : on retire l'intention qu'on vient d'inscrire. Le pid vient d'etre tue ; laisser
@@ -434,7 +466,7 @@ export class Supervisor {
         // C'est CE parametre qui rend l'orphelin du 31/07 tuable AUTOMATIQUEMENT (0-human).
         const { reap, kept } = reapDecision(reg, alive, Date.now(), this.ttl, startStaleMs());
         for (const r of reap) {
-          try { treeKill(r.pid); } catch {}
+          this._killIfOurs(r.pid, (reg.servers || {})[r.profile]?.identity, `reap ${r.reason}`);
           log(`[supervisor] reap ${r.profile} (${r.reason}) pid=${r.pid} port=${r.port}`);
           // ⚠️ Dead-man (doctrine « crier quand ca meurt ») : un serveur DEAD = mort INATTENDUE (crash)
           // vs 'idle' = fin de vie NORMALE (plus de client). On alerte UNIQUEMENT le crash pour reperer
