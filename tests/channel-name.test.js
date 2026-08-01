@@ -6,7 +6,8 @@
 import { test, expect } from 'vitest';
 import fc from 'fast-check';
 import path from 'node:path';
-import { channelName, encodeProfile, channelIsFile, SUN_PATH_MAX } from '../src/channel-name.js';
+import os from 'node:os';
+import { channelName, encodeProfile, channelIsFile, runtimeDir, SUN_PATH_MAX } from '../src/channel-name.js';
 
 const WIN = { platform: 'win32' };
 const NIX = { platform: 'linux', tmpdir: '/tmp' };
@@ -69,6 +70,22 @@ test('POSIX : juste sous la limite ⇒ accepte (la borne n est pas trop stricte)
 test('Windows ignore la limite sun_path (espace de noms, pas un chemin de fichier)', () => {
   const long = 'y'.repeat(300);
   expect(channelName(long, WIN)).toContain(long);
+});
+
+test('POSIX : $XDG_RUNTIME_DIR prefere a /tmp (systemd purge /tmp apres 10 jours)', () => {
+  // Sans ca : socket EFFACEE sous un lanceur VIVANT ⇒ un 2e `listen()` reussit ⇒ DEUX lanceurs
+  // ⇒ double spawn ⇒ « browser is already in use ». La garantie du canal sautait sur la duree.
+  expect(runtimeDir('linux', { XDG_RUNTIME_DIR: '/run/user/1000' })).toBe('/run/user/1000');
+});
+
+test('POSIX : repli sur tmpdir si XDG absent ou relatif (defaut connu, pas une equivalence)', () => {
+  expect(runtimeDir('linux', {})).toBe(os.tmpdir());
+  expect(runtimeDir('linux', { XDG_RUNTIME_DIR: '' })).toBe(os.tmpdir());
+  expect(runtimeDir('linux', { XDG_RUNTIME_DIR: 'relatif/pas/absolu' })).toBe(os.tmpdir());
+});
+
+test('Windows : XDG ignore (les named pipes ne sont pas des fichiers)', () => {
+  expect(runtimeDir('win32', { XDG_RUNTIME_DIR: '/run/user/1000' })).toBe(os.tmpdir());
 });
 
 test('channelIsFile : POSIX oui (survit au crash), Windows non (le noyau detruit)', () => {

@@ -49,6 +49,24 @@ export function encodeProfile(profile) {
 }
 
 /**
+ * Repertoire ou poser une socket de domaine Unix, par ordre de PREFERENCE.
+ *
+ * ⚠️ `$XDG_RUNTIME_DIR` d'abord : c'est le SEUL emplacement garanti non nettoye pendant la session
+ *    (et en mode 0700). `/tmp` est purge par `systemd-tmpfiles` apres 10 jours d'inactivite du
+ *    fichier — sur un service qui tourne des mois, c'est une CERTITUDE, pas un risque.
+ * ⚠️ Repli sur `os.tmpdir()` quand la variable est absente (macOS, session non-systemd, cron) :
+ *    mieux vaut un canal dans /tmp que pas de canal du tout. Le repli est un DEFAUT CONNU, pas
+ *    une equivalence — ne pas le presenter comme tel.
+ * ⚠️ Valeur RELATIVE ignoree : la spec XDG impose un chemin absolu ; une valeur relative viendrait
+ *    d'un environnement casse et poserait la socket a un endroit imprevisible.
+ */
+export function runtimeDir(platform = process.platform, env = process.env) {
+  const xdg = env.XDG_RUNTIME_DIR;
+  if (platform !== 'win32' && typeof xdg === 'string' && path.isAbsolute(xdg)) return xdg;
+  return os.tmpdir();
+}
+
+/**
  * Nom du canal de lancement pour un profil, selon la plateforme.
  *
  * Windows : `\\.\pipe\pw-mcp-<profil>` — espace de noms dedie, aucune limite pratique de longueur,
@@ -72,7 +90,16 @@ export function channelName(profile, env = {}) {
     return `\\\\.\\pipe\\${PREFIX}${enc}`;
   }
 
-  const dir = env.tmpdir || os.tmpdir();
+  // ⚠️ `$XDG_RUNTIME_DIR` AVANT `os.tmpdir()`, et ce n'est PAS un detail de confort :
+  // `systemd-tmpfiles` supprime par defaut ce qui n'a pas ete touche depuis **10 jours** dans
+  // `/tmp` (doc officielle systemd.io/TEMPORARY_DIRECTORIES). Un serveur actif depuis 2 semaines
+  // verrait donc son fichier socket EFFACE SOUS LUI alors qu'il vit ⇒ un nouveau proxy reussirait
+  // son `listen()` ⇒ **DEUX lanceurs simultanes** ⇒ double spawn ⇒ « browser is already in use ».
+  // La garantie d'exclusion du canal saute exactement au moment ou elle compte : la longue duree.
+  // `$XDG_RUNTIME_DIR` est le repertoire prevu pour ca (sockets/pipes), en mode 0700 — donc il
+  // corrige AUSSI le fait qu'une socket dans /tmp est lisible par les autres utilisateurs locaux.
+  // ⚠️ `env.tmpdir` reste prioritaire : c'est l'injection des TESTS, jamais un chemin de prod.
+  const dir = env.tmpdir || runtimeDir(platform);
   const full = path.join(dir, `${PREFIX}${enc}.sock`);
   if (Buffer.byteLength(full) > SUN_PATH_MAX) {
     // ⚠️ FAILS-CLOSED. NE PAS "resoudre" en hachant le nom : un hash reintroduit la collision,
