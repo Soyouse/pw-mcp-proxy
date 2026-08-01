@@ -1,0 +1,33 @@
+# RÈGLE PARC — « le temps se déclare » (ast-grep, analyse AST réelle)
+#
+# Détecte TOUT appel temporel actif. Elle ne juge PAS et n'exempte RIEN :
+# la politique (quels fichiers ont droit à combien, avec quelle justification)
+# vit dans UN SEUL endroit — tests/no-inference-gate.test.js — qui consomme
+# la sortie JSON de cette règle. Séparation volontaire :
+#   • ast-grep = DÉTECTION exacte (vrai parseur ⇒ ignore commentaires et chaînes)
+#   • le test  = POLITIQUE + cliquet (budget par fichier, ne peut que descendre)
+# Dupliquer les exemptions ici créerait deux vérités qui divergent.
+#
+# POURQUOI (incident 31/07→01/08/2026) : un délai ne répond pas à « est-il mort ? »,
+# il le DEVINE. En LOCAL, le noyau répond exactement et par événement (fin de
+# processus, socket fermé, EADDRINUSE) ⇒ tout délai y est un bug.
+# Seuls motifs recevables : "distant" (aucune autorité joignable) ou
+# "indécidable" (vivant-vs-figé = problème de l'arrêt).
+#
+# ⚠️ Les regex sont INTERDITES pour ce contrôle : `setTimeout` dans un commentaire
+#    ou une chaîne produirait un faux positif. C'est précisément ce que l'AST évite.
+
+id: no-undeclared-timing
+language: JavaScript
+severity: error
+message: 'Appel temporel non déclaré — le temps se déclare (motif recevable = distant ou indécidable)'
+note: |
+  Avant d'ajouter un délai : QUI SAIT ?
+  LOCAL  -> le noyau sait (exit du processus, socket fermé, EADDRINUSE) : le délai est un BUG.
+  DISTANT-> aucune autorité joignable : légitime, à déclarer dans le budget du gate.
+  Voir skill pw-mcp-proxy §DÉCISION D'ARCHITECTURE + memory feedback-interroger-ce-qui-sait.
+rule:
+  any:
+    - pattern: setTimeout($$$ARGS)
+    - pattern: setInterval($$$ARGS)
+    - pattern: setImmediate($$$ARGS)

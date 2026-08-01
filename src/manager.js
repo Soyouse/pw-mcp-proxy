@@ -17,6 +17,8 @@ import { buildSpec } from './spec.js';
 import { shouldAutoRestart, DEFAULT_MAX_RESTARTS, DEFAULT_WINDOW_MS } from './auto-restart.js';
 import { formatFreezeReport } from './freeze-report.js';
 import { serverEntry } from './server-registry.js';
+// ⚠️ SOURCE UNIQUE des delais (budget.js) — NE JAMAIS redeclarer une duree ici.
+import { CONFIG_WATCH_INTERVAL_MS } from './budget.js';
 
 const DEFAULT_CLIENT_INFO = {
   protocolVersion: '2025-06-18',
@@ -74,7 +76,7 @@ export class Manager {
   }
 
   _watch() {
-    fs.watchFile(this.configPath, { interval: 1000 }, async () => {
+    fs.watchFile(this.configPath, { interval: CONFIG_WATCH_INTERVAL_MS }, async () => {
       try {
         this._loadConfig();
         await this._reconcile();

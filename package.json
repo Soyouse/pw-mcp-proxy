@@ -22,6 +22,7 @@
     "node": ">=20"
   },
   "devDependencies": {
+    "@ast-grep/cli": "^0.45.0",
     "@stryker-mutator/core": "^8.7.1",
     "@stryker-mutator/vitest-runner": "^8.7.1",
     "dependency-cruiser": "^18.0.0",

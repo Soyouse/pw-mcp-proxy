@@ -53,6 +53,7 @@ import { treeKill, isPidAlive, sweepByCmd } from './prockill.js';
 import { resolveShellSpawn } from './spawn-cmd.js';
 import { alert } from './notify.js';
 import { log } from './logger.js';
+import { describeError } from './error-detail.js';
 
 // ⚠️ Host / DNS-rebinding : on suit la CONFIGURATION DOCUMENTÉE par Microsoft (skill playwright-mcp-api,
 // playwright.dev/mcp/configuration/options), sans rien rétro-ingénierer :
@@ -319,7 +320,7 @@ export class Supervisor {
       windowsHide: true,
       shell,
     });
-    child.on('error', (e) => log(`[supervisor:${profile}] spawn error: ${e.message}`));
+    child.on('error', (e) => log(`[supervisor:${profile}] spawn error: ${describeError(e)}`));
     const pid = child.pid;
     child.unref(); // ⚠️ ne pas retenir l'event loop du proxy sur ce serveur detache
     if (!pid) return null; // spawn avorte : aucun process a tracer, donc rien a inscrire ni a tuer
@@ -354,7 +355,7 @@ export class Supervisor {
         this._write(reg);
       });
     } catch (e) {
-      log(`[supervisor:${profile}] heartbeat rate: ${e.message}`);
+      log(`[supervisor:${profile}] heartbeat rate: ${describeError(e)}`);
     }
   }
   // A appeler quand CE proxy lache un profil (switch) ou s'arrete : retire mon heartbeat.
@@ -367,7 +368,7 @@ export class Supervisor {
         this._write(reg);
       });
     } catch (e) {
-      log(`[supervisor:${profile}] unregister rate: ${e.message}`);
+      log(`[supervisor:${profile}] unregister rate: ${describeError(e)}`);
     }
   }
 
@@ -400,7 +401,7 @@ export class Supervisor {
         if (reap.length) this._write(kept);
       });
     } catch (e) {
-      log(`[supervisor] reap rate: ${e.message}`);
+      log(`[supervisor] reap rate: ${describeError(e)}`);
     }
   }
   startReaper(period = HEARTBEAT_MS) {

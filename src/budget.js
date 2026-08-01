@@ -108,3 +108,18 @@ export const START_STALE_FACTOR = 1.5;
 export function startStaleMs(readyTimeout = READY_TIMEOUT_MS) {
   return Math.floor(readyTimeout * START_STALE_FACTOR);
 }
+
+// ⚠️ Delais RAPATRIES ici par le gate statique  (31/07) : ils vivaient en dur
+// dans manager.js et notify.js. Aucun n'etait faux — mais c'est EXACTEMENT la dispersion couche par
+// couche qui a coute la connexion MCP du 31/07 (chaque couche son delai, aucune vue d'ensemble).
+// Un delai invisible depuis ce fichier est un delai que personne ne pourra arbitrer le jour ou il faudra.
+
+// Periode de scrutation du fichier de config (hot-reload). fs.watchFile POLLE : trop court = reveils
+// inutiles a la seconde ; trop long = un changement de profil met des secondes a etre vu. 1 s = compromis
+// eprouve. ⚠️ NE PAS descendre : ce timer tourne en permanence, pour un fichier qui change 2x par mois.
+export const CONFIG_WATCH_INTERVAL_MS = 1000;
+
+// Borne de l'alerte dead-man (NTFY). ⚠️ COURTE ET OBLIGATOIRE : alerter est best-effort, mais une
+// alerte qui PEND retiendrait un arret du proxy. Une alerte perdue est benigne ; un proxy bloque par
+// son propre canal d'alerte serait un comble (le remede devenu la panne).
+export const ALERT_TIMEOUT_MS = 4000;
