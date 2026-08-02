@@ -27,24 +27,34 @@
 
 import net from 'node:net';
 
-// ⚠️ On alloue sur 127.0.0.1 UNIQUEMENT, jamais 0.0.0.0 : un port libre sur toutes les interfaces ne
-// prouve PAS qu'il est libre sur la loopback (et inversement). Le serveur @playwright/mcp bind
-// `localhost` (defaut documente) => on doit interroger l'OS sur CETTE MEME interface, sinon on lui
-// donnerait un port valide « ailleurs » et le bind echouerait. MEME interface des deux cotes, toujours.
-const LOOPBACK = '127.0.0.1';
+// 🛑 ON ALLOUE SUR **EXACTEMENT LA MEME CHAINE D'HOTE** QUE CELLE QUE LE SERVEUR VA BINDER, jamais
+// 0.0.0.0 : un port libre sur une interface ne prouve RIEN sur une autre.
+//
+// ⚠️ BUG MESURE LE 02/08 — `'localhost'` N'EST PAS `'127.0.0.1'`. Sur une machine a double pile,
+// `localhost` resout d'abord en **`::1`** (verifie : `dns.lookup('localhost',{all:true})` rend
+// `[::1, 127.0.0.1]` et `listen(0,'localhost')` bind `::1`). On allouait donc le port sur l'IPv4
+// pendant que le serveur bindait l'IPv6 : port declare libre la ou le serveur n'ira JAMAIS, et
+// potentiellement DEJA PRIS la ou il va. Symptome : « serveur VIVANT mais silencieux apres
+// 20000ms » — le process tourne, mais son `listen` a echoue ou vise une autre pile. Longtemps
+// impute a tort a « la loopback tombe sous charge » : ce n'etait pas la charge, c'etait la pile.
+// ⚠️ NE JAMAIS remettre un littéral d'adresse ici : c'est le NOM que le serveur recoit en `--host`
+// qui fait foi, et lui seul. Un jour ou le defaut de `@playwright/mcp` changerait, ce parametre
+// suit tout seul.
+const HOTE_PAR_DEFAUT = 'localhost'; // = BIND_HOST du daemon (defaut documente @playwright/mcp)
 
 /**
- * Demande a l'OS un port TCP libre sur la loopback, puis rend la main.
+ * Demande a l'OS un port TCP libre SUR L'HOTE OU LE SERVEUR VA BINDER, puis rend la main.
  * Le socket est ferme AVANT de resoudre : le port est libre pour le serveur qu'on va lancer.
+ * @param {string} [hote] la MEME chaine que le `--host` du serveur — ne pas la « normaliser »
  * @returns {Promise<number>} numero de port (jamais 0, jamais devine)
  */
-export function allocateEphemeralPort() {
+export function allocateEphemeralPort(hote = HOTE_PAR_DEFAUT) {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
     // ⚠️ Handler d'erreur AVANT listen : un EADDRINUSE/EACCES non capture sur un serveur net = throw
     // asynchrone non rattrapable => proxy mort. Fails-closed : on rejette, l'appelant decide.
     srv.on('error', reject);
-    srv.listen(0, LOOPBACK, () => {
+    srv.listen(0, hote, () => {
       const addr = srv.address();
       // `address()` rend un objet {port} pour un socket TCP. Defensif : si l'OS rendait autre chose
       // (cas non documente), on refuse plutot que de propager un port invalide dans le registre.

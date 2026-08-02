@@ -10,35 +10,55 @@
 
 import { test, beforeAll, afterAll, expect } from 'vitest';
 import os from 'node:os';
+import net from 'node:net';
 import path from 'node:path';
 import fs from 'node:fs';
-import { Supervisor } from '../src/supervisor.js';
 import { Backend } from '../src/backend.js';
 import { HttpTransport } from '../src/http-transport.js';
 import { Manager } from '../src/manager.js';
 import { buildSpec } from '../src/spec.js';
-import { serverEntry } from '../src/server-registry.js';
+import { acquerirProfil } from '../src/daemon-client.js';
 import { treeKill, isPidAlive, listProcesses } from '../src/prockill.js';
 
 const LIVE = process.env.PW_MCP_LIVE === '1';
 const VERSION = process.env.PW_MCP_VERSION || '0.0.78'; // PIN : aligner sur profiles.json
 const CLIENT = { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'contract', version: '1' } };
 
-let cfg, sup;
+let cfg;
+const connexions = []; // ⚠️ CHAQUE socket ouverte = un client compté : les garder, sinon le daemon arrête le serveur
 
-beforeAll(() => {
-  cfg = path.join(os.tmpdir(), `pw-mcp-live-${process.pid}.json`);
-  sup = new Supervisor(cfg, { ttl: 60000 });
-});
-afterAll(async () => {
+/**
+ * Obtient (ou partage) le serveur d'un profil — ce que fait `manager._makeTransport` en prod.
+ * ⚠️ La socket est CONSERVÉE : elle EST le ref-count. Remplace l'ancien couple
+ * `ensureServer` + `registerClient`, dont l'oubli du second décrivait un agent fantôme.
+ */
+async function serveurPour(profil, spec) {
+  const { url, connexion } = await acquerirProfil(profil, spec, {});
+  connexions.push(connexion);
+  return url;
+}
+
+/** Le pid du serveur derrière une URL — observé sur le PROCESS, jamais lu dans un fichier d'état. */
+function pidDeLUrl(url) {
+  const port = new URL(url).port;
+  return listProcesses().find((p) => p.cmd.includes(`--port ${port}`))?.pid;
+}
+
+/** Le port répond-il ? ⚠️ `localhost`, JAMAIS `127.0.0.1` (validation du Host header => 403). */
+function repond(port) {
+  return new Promise((resolve) => {
+    const sock = net.connect(Number(port), 'localhost');
+    const fin = (v) => { sock.destroy(); resolve(v); };
+    sock.on('connect', () => fin(true));
+    sock.on('error', () => fin(false));
+  });
+}
+
+beforeAll(() => { cfg = path.join(os.tmpdir(), `pw-mcp-live-${process.pid}.json`); });
+afterAll(() => {
   if (!LIVE) return;
-  try { await sup.shutdown(); } catch {}
-  try {
-    const reg = JSON.parse(fs.readFileSync(sup.registryPath, 'utf8'));
-    for (const s of Object.values(reg.servers || {})) { try { treeKill(s.pid); } catch {} }
-  } catch {}
-  try { fs.unlinkSync(sup.registryPath); } catch {}
-  try { fs.unlinkSync(sup.lockPath); } catch {}
+  // Rendre tous les profils : le daemon arrête ses serveurs et sort SEUL (dernier client parti).
+  for (const c of connexions.splice(0)) { try { c.destroy(); } catch {} }
 });
 
 test.skipIf(!LIVE)('LIVE : superviseur spawn le vrai @playwright/mcp --port, 2 agents ADOPTENT le meme serveur + browser_navigate expose', async () => {
@@ -46,9 +66,9 @@ test.skipIf(!LIVE)('LIVE : superviseur spawn le vrai @playwright/mcp --port, 2 a
   const spec = buildSpec('anon', { isolated: true, args: ['--headless'], backend: { command: 'npx', args: ['-y', `@playwright/mcp@${VERSION}`] } }, {});
 
   // Agent A : garantit le serveur, se connecte en client HTTP, handshake reel.
-  const url = await sup.ensureServer('anon', spec);
+  const url = await serveurPour('anon', spec);
   expect(url).toMatch(/^http:\/\/localhost:\d+\/mcp$/); // URL client documentee (localhost, cf --allowed-hosts)
-  const pidA = serverEntry(sup._read(), 'anon').pid;
+  const pidA = pidDeLUrl(url);
 
   const a = new Backend('anon', new HttpTransport(url, { protocolVersion: CLIENT.protocolVersion, spec }));
   const initA = await a.start(CLIENT);
@@ -59,8 +79,8 @@ test.skipIf(!LIVE)('LIVE : superviseur spawn le vrai @playwright/mcp --port, 2 a
   expect(names.includes('browser_navigate'), 'le vrai backend expose browser_navigate (passthrough)').toBeTruthy();
 
   // Agent B : 2e proxy, MEME profil => doit ADOPTER le serveur d'A (multi-agent, pas de 2e spawn).
-  const url2 = await sup.ensureServer('anon', spec);
-  const pidB = serverEntry(sup._read(), 'anon').pid;
+  const url2 = await serveurPour('anon', spec);
+  const pidB = pidDeLUrl(url2);
   expect(url2, 'meme URL').toBe(url);
   expect(pidB, 'MEME serveur adopte : multi-agent sur le vrai binaire').toBe(pidA);
 
@@ -81,7 +101,7 @@ test.skipIf(!LIVE)('LIVE : le VRAI @playwright/mcp repond au `ping` MCP (fondati
   // ici contre le binaire reel (pas un fake) => si une update `@playwright/mcp` cassait le ping, ce
   // test devient ROUGE en nightly AVANT que le watchdog ne se mette a tuer des backends sains.
   const spec = buildSpec('anon', { isolated: true, args: ['--headless'], backend: { command: 'npx', args: ['-y', `@playwright/mcp@${VERSION}`] } }, {});
-  const url = await sup.ensureServer('anon', spec);
+  const url = await serveurPour('anon', spec);
   const a = new Backend('anon', new HttpTransport(url, { protocolVersion: CLIENT.protocolVersion, spec }));
   await a.start(CLIENT);
 
@@ -102,7 +122,7 @@ test.skipIf(!LIVE)('LIVE : profil PERSISTANT partage (--user-data-dir jetable + 
   const spec = buildSpec('persist', { userDataDir: dir, args: ['--headless'], backend: { command: 'npx', args: ['-y', `@playwright/mcp@${VERSION}`] } }, {}, { http: true });
 
   // Un SEUL serveur (SingletonLock sur le --user-data-dir) ; les 2 agents doivent l'adopter.
-  const url = await sup.ensureServer('persist', spec, { userDataDir: dir });
+  const url = await serveurPour('persist', spec);
   const a = new Backend('persist', new HttpTransport(url, { protocolVersion: CLIENT.protocolVersion, spec }));
   const b = new Backend('persist', new HttpTransport(url, { protocolVersion: CLIENT.protocolVersion, spec }));
   await a.start(CLIENT);
@@ -136,9 +156,9 @@ test.skipIf(!LIVE)('LIVE : MORT de Chrome sous serveur VIVANT => l action REVIEN
   const spec = buildSpec('cd', { userDataDir: dir, args: ['--headless'], backend: { command: 'npx', args: ['-y', `@playwright/mcp@${VERSION}`] } }, {}, { http: true });
   const needle = path.basename(dir); // fragment UNIQUE present dans la cmdline de chaque enfant browser
 
-  const url = await sup.ensureServer('cd', spec, { userDataDir: dir });
-  const serverPid = serverEntry(sup._read(), 'cd').pid;
-  const port = serverEntry(sup._read(), 'cd').port;
+  const url = await serveurPour('cd', spec);
+  const serverPid = pidDeLUrl(url);
+  const port = new URL(url).port;
   // Watchdog quasi desactive (pingIntervalMs enorme) : on mesure le contrat BRUT du serveur, pas la couche 1.
   const a = new Backend('cd', new HttpTransport(url, { protocolVersion: CLIENT.protocolVersion, spec }), { pingIntervalMs: 3600000 });
   await a.start(CLIENT);
@@ -159,7 +179,7 @@ test.skipIf(!LIVE)('LIVE : MORT de Chrome sous serveur VIVANT => l action REVIEN
   // CONTRAT 1 : le node serveur SURVIT (ne s'arrete PAS sur disconnected sur cette version).
   expect(isPidAlive(serverPid), 'le serveur node survit a la mort de son Chrome').toBe(true);
   // CONTRAT 2 : le GET /mcp reste VERT (aveugle a la mort du browser).
-  expect(await sup._probeReady(port), '_probeReady reste vert (aveugle a la mort du browser)').toBe(true);
+  expect(await repond(port), 'le port repond toujours (aveugle a la mort du browser)').toBe(true);
   // CONTRAT 3 : le ping MCP repond {} (aveugle : le node vit, seul le browser est mort).
   expect(await a.request('ping', {}), 'ping reste vert (aveugle)').toEqual({});
   // CONTRAT 4 (LE coeur, la seule chose qui compte) : l'action REVIENT en <20s — erreur OU succes
@@ -198,7 +218,13 @@ test.skipIf(!LIVE)('LIVE : serveur partage TUE sous un Manager REEL => echec RAP
     const b1 = await mgr.get('anon2');
     const r1 = await b1.request('tools/call', { name: 'browser_navigate', arguments: { url: 'data:text/html,<title>sain</title>' } });
     expect(r1?.isError, 'etat sain de reference (navigate OK)').not.toBe(true);
-    const pid1 = serverEntry(mgr.supervisor._read(), 'anon2').pid;
+    // ⚠️ Le pid du serveur partage se trouve par son `--port` (le port que CE backend utilise
+    // vraiment), JAMAIS par un registre : depuis le daemon, l'etat n'est plus persiste — et cette
+    // facon de faire est de toute facon plus vraie, elle observe le PROCESS au lieu d'un fichier.
+    const port1 = new URL(b1.transport.url).port;
+    const cible = listProcesses().find((p) => p.cmd.includes(`--port ${port1}`));
+    expect(cible, `aucun process ne sert le port ${port1}`).toBeTruthy();
+    const pid1 = cible.pid;
 
     // Le serveur partage meurt sous nos pieds (reap/restart d'un autre agent, crash...).
     treeKill(pid1);
@@ -219,8 +245,10 @@ test.skipIf(!LIVE)('LIVE : serveur partage TUE sous un Manager REEL => echec RAP
     // session neuve, l'action REUSSIT sans aucune intervention.
     const b2 = await mgr.get('anon2');
     expect(b2, 'backend FRAIS (jamais le cadavre ranime)').not.toBe(b1);
-    const pid2 = serverEntry(mgr.supervisor._read(), 'anon2').pid;
-    expect(pid2, 'nouveau serveur respawne par le self-heal').not.toBe(pid1);
+    const port2 = new URL(b2.transport.url).port;
+    expect(port2, 'serveur NEUF : jamais le port du cadavre').not.toBe(port1);
+    const pid2 = listProcesses().find((p) => p.cmd.includes(`--port ${port2}`))?.pid;
+    expect(pid2, 'nouveau serveur respawne par le daemon').not.toBe(pid1);
     const r2 = await b2.request('tools/call', { name: 'browser_navigate', arguments: { url: 'data:text/html,<title>reprise</title>' } });
     expect(r2?.isError, 'action apres reprise : SUCCES transparent').not.toBe(true);
 
@@ -228,11 +256,96 @@ test.skipIf(!LIVE)('LIVE : serveur partage TUE sous un Manager REEL => echec RAP
   } finally {
     mgr.stopAll();
     try { await mgr.stopSupervision(); } catch {}
-    try {
-      const reg = JSON.parse(fs.readFileSync(mgr.supervisor.registryPath, 'utf8'));
-      for (const s of Object.values(reg.servers || {})) { try { treeKill(s.pid); } catch {} }
-    } catch {}
+    // ⚠️ Le daemon s'arrête SEUL quand son dernier client part (`mgr.stopAll()` ferme la socket) :
+    // il n'y a plus de registre à balayer. Le harnais reste le filet de dernier recours.
     try { fs.unwatchFile(mgrCfg); } catch {}
     try { fs.unlinkSync(mgrCfg); } catch {}
   }
 });
+
+// ═══ S8 — ETANCHEITE DES IDENTITES (scenario du skill §COMPORTEMENT ATTENDU) ══════════════════
+// ⚠️ C'EST LA RAISON D'ETRE DU PROJET, et RIEN ne la verifiait jusqu'au 02/08/2026 : « 1 profil =
+// 1 compte Google ». Si les cookies fuient d'un profil a l'autre, l'agent agit sur le MAUVAIS
+// compte — et ca casserait EN SILENCE (aucune erreur, juste la mauvaise identite).
+// On ne teste pas la presence du flag --user-data-dir (ca, spec.js le fait) : on teste le FAIT,
+// avec deux VRAIS navigateurs et un vrai cookie.
+test.skipIf(!LIVE)('LIVE S8 : un cookie pose dans le profil A est INVISIBLE depuis le profil B', async () => {
+  const http = await import('node:http');
+  // Un cookie exige une vraie origine (data: ne compte pas) => mini-site local.
+  const site = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<html><body>ok</body></html>');
+  });
+  site.on('connection', (s) => s.on('error', () => {}));
+  await new Promise((r) => site.listen(0, '127.0.0.1', r));
+  const origin = `http://localhost:${site.address().port}/`;
+
+  const dirs = [];
+  const backends = [];
+  const mkProfil = async (nom) => {
+    const udd = path.join(os.tmpdir(), `pw-mcp-s8-${process.pid}-${nom}`);
+    dirs.push(udd);
+    const spec = buildSpec(nom, {
+      userDataDir: udd,
+      args: ['--headless'],
+      backend: { command: 'npx', args: ['-y', `@playwright/mcp@${VERSION}`] },
+    }, {}, { http: true }); // http => --shared-browser-context (multi-agent), comme en prod
+    const url = await serveurPour(nom, spec);
+    const b = new Backend(nom, new HttpTransport(url, { protocolVersion: CLIENT.protocolVersion, spec }));
+    await b.start(CLIENT);
+    backends.push(b);
+    return b;
+  };
+  const call = (b, name, args) => b.request('tools/call', { name, arguments: args });
+
+  try {
+    // --- profil A : on pose un cookie sur l'origine
+    const A = await mkProfil(`s8a${process.pid}`);
+    await call(A, 'browser_navigate', { url: origin });
+    await call(A, 'browser_evaluate', { function: '() => { document.cookie = "identite=profilA; path=/"; return document.cookie; }' });
+    const relu = await call(A, 'browser_evaluate', { function: '() => document.cookie' });
+    expect(JSON.stringify(relu), 'prealable : le cookie EST bien pose dans A').toMatch(/profilA/);
+
+    // --- profil B : meme origine, navigateur et user-data-dir DIFFERENTS
+    const B = await mkProfil(`s8b${process.pid}`);
+    await call(B, 'browser_navigate', { url: origin });
+    const vuParB = await call(B, 'browser_evaluate', { function: '() => document.cookie' });
+
+    expect(
+      JSON.stringify(vuParB),
+      'ETANCHEITE VIOLEE : le cookie du profil A est visible depuis le profil B — un agent agirait sur le MAUVAIS compte'
+    ).not.toMatch(/profilA/);
+  } finally {
+    for (const b of backends) { try { b.stop(); } catch {} }
+    await new Promise((r) => site.close(r));
+    for (const d of dirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
+  }
+}, 240000);
+
+// ═══ S3 — N AGENTS A TOUR DE ROLE (scenario du skill) ═════════════════════════════════════════
+// Le mode COOPERATIF est le mode VOULU : plusieurs agents partagent 1 navigateur et agissent
+// chacun leur tour. Teste ce que l'utilisateur constate reellement — pas seulement que les deux
+// backends « existent » (ca, le test d'adoption le fait deja) : que les DEUX AGISSENT avec succes.
+test.skipIf(!LIVE)('LIVE S3 : deux agents agissent A TOUR DE ROLE sur le meme navigateur partage', async () => {
+  const spec = buildSpec('anon', { isolated: true, args: ['--headless'], backend: { command: 'npx', args: ['-y', `@playwright/mcp@${VERSION}`] } }, {});
+  const url = await serveurPour('anon', spec);
+
+  const a = new Backend('anon', new HttpTransport(url, { protocolVersion: CLIENT.protocolVersion, spec }));
+  const b = new Backend('anon', new HttpTransport(url, { protocolVersion: CLIENT.protocolVersion, spec }));
+  await a.start(CLIENT);
+  await b.start(CLIENT);
+
+  try {
+    const call = (x, name, args) => x.request('tools/call', { name, arguments: args });
+    // Chacun son tour, jamais en meme temps (la regle de cooperation documentee).
+    const r1 = await call(a, 'browser_navigate', { url: 'about:blank' });
+    expect(r1?.isError, 'agent A agit sans erreur').toBeFalsy();
+    const r2 = await call(b, 'browser_snapshot', {});
+    expect(r2?.isError, 'agent B agit ENSUITE sans erreur, sur le meme navigateur').toBeFalsy();
+    const r3 = await call(a, 'browser_snapshot', {});
+    expect(r3?.isError, 'agent A reprend la main apres B').toBeFalsy();
+  } finally {
+    try { a.stop(); } catch {}
+    try { b.stop(); } catch {}
+  }
+}, 180000);

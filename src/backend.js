@@ -10,6 +10,7 @@
 
 import { EventEmitter } from 'node:events';
 import { log } from './logger.js';
+import { describeError } from './error-detail.js';
 
 export class Backend extends EventEmitter {
   // ⚠️ options.ping* = WATCHDOG DE LIVENESS (garde-fou fails-closed contre le GEL du backend).
@@ -67,7 +68,7 @@ export class Backend extends EventEmitter {
     this.transport.on('exit', (code, sig) => this._onExit(code, sig));
     this.transport.on('close', () => this._onExit(null, 'close'));
     this.transport.on('error', (e) => {
-      log(`[backend:${this.profile}] transport error: ${e?.message || e}`);
+      log(`[backend:${this.profile}] transport error: ${describeError(e)}`);
       this._onExit(-1, 'error');
     });
 

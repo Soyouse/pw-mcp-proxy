@@ -16,6 +16,8 @@ import { detectCollisions, canonicalInjectedName, exposedName, isOurToolCall } f
 import { alert } from './notify.js';
 import { withDeadline } from './deadline.js';
 import { clientBudgetMs, handshakeBudgetMs } from './budget.js';
+// ⚠️ describeError : JAMAIS `e.message` seul (il peut etre VIDE — incident 01/08).
+import { describeError } from './error-detail.js';
 
 const PROTOCOL_FALLBACK = '2025-06-18';
 
@@ -85,7 +87,7 @@ export class Router {
       const b = await this.manager.active();
       b.forwardNotification(msg);
     } catch (e) {
-      log('notif Claude non relayee: ' + e.message);
+      log('notif Claude non relayee: ' + describeError(e));
     }
   }
 
@@ -111,7 +113,7 @@ export class Router {
       const b = await this.manager.active();
       b.forwardRequest(msg);
     } catch (e) {
-      this._send({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: `backend actif indisponible: ${e.message}` } });
+      this._send({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: `backend actif indisponible: ${describeError(e)}` } });
     }
   }
 
@@ -320,7 +322,7 @@ export class Router {
       this._send({
         jsonrpc: '2.0',
         id: msg.id,
-        result: { content: [{ type: 'text', text: `Echec du redemarrage de "${target}": ${e.message}` }], isError: true },
+        result: { content: [{ type: 'text', text: `Echec du redemarrage de "${target}": ${describeError(e)}` }], isError: true },
       });
     }
   }
@@ -346,8 +348,10 @@ export class Router {
       });
     }
     try {
-      await this.manager.get(target); // spawn + handshake si lazy
-      this.manager.activeProfile = target;
+      // ⚠️ setActiveProfile, JAMAIS `get()` + affectation directe : la methode LIBERE aussi l'ancien
+      // profil (ferme son transport + retire le heartbeat). Sauter cette liberation = le backend
+      // quitte survit en zombie et respawn en boucle (incident 02/08, cf manager.setActiveProfile).
+      await this.manager.setActiveProfile(target);
       const label = this.manager.config.profiles[target].label || target;
       this._send({
         jsonrpc: '2.0',
@@ -362,7 +366,7 @@ export class Router {
       this._send({
         jsonrpc: '2.0',
         id: msg.id,
-        result: { content: [{ type: 'text', text: `Echec du switch vers "${target}": ${e.message}` }], isError: true },
+        result: { content: [{ type: 'text', text: `Echec du switch vers "${target}": ${describeError(e)}` }], isError: true },
       });
     }
   }

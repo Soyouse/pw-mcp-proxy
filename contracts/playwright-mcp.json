@@ -1,0 +1,80 @@
+{
+  "_lisez_moi": "INSTANTANE DATE des surfaces TIERCES dont pw-mcp-proxy depend. Compare au binaire reel par tests/contract-snapshot.test.js. NE PAS editer a la main pour faire passer un test : re-capturer, RELIRE les diffs, puis mettre a jour le skill playwright-mcp-api ET le BACKLOG dans le meme geste.",
+  "package": "@playwright/mcp",
+  "version": "0.0.78",
+  "distTagLatestAuMomentDuSnapshot": "0.0.78",
+  "capturePar": "npx -y @playwright/mcp@0.0.78 --help",
+  "captureLe": "2026-08-02",
+  "requis": {
+    "_pourquoi": "Flags que le CODE construit reellement (src/spec.js, src/supervisor.js). La disparition de l'UN d'eux casse le proxy en PRODUCTION => ROUGE FATAL.",
+    "flags": [
+      "--caps",
+      "--host",
+      "--isolated",
+      "--port",
+      "--shared-browser-context",
+      "--user-data-dir"
+    ]
+  },
+  "absents": {
+    "_pourquoi": "Capacites VERIFIEES ABSENTES le 02/08. Leur APPARITION est une BONNE nouvelle qui doit remonter : un auto-shutdown natif rendrait le daemon maison INUTILE (cf skill playwright-mcp-api, alternatives epuisees). Le test rougit alors pour signaler une OPPORTUNITE DE SIMPLIFIER, jamais une panne.",
+    "flags": [
+      "--idle-timeout",
+      "--shutdown-when-idle",
+      "--auto-shutdown",
+      "--exit-when-idle"
+    ]
+  },
+  "surfaceComplete": {
+    "_pourquoi": "Tous les flags au moment du snapshot. Divergence = l'upstream a bouge => relire les diffs AVANT de deployer. Sur une version PINNEE ce test ne peut rougir qu'au BUMP : exactement le moment ou l'on veut etre alerte.",
+    "flags": [
+      "--allow-unrestricted-file-access",
+      "--allowed-hosts",
+      "--allowed-origins",
+      "--block-service-workers",
+      "--blocked-origins",
+      "--browser",
+      "--caps",
+      "--cdp-endpoint",
+      "--cdp-header",
+      "--cdp-timeout",
+      "--codegen",
+      "--config",
+      "--console-level",
+      "--device",
+      "--endpoint",
+      "--executable-path",
+      "--extension",
+      "--grant-permissions",
+      "--headless",
+      "--help",
+      "--host",
+      "--ignore-https-errors",
+      "--image-responses",
+      "--init-page",
+      "--init-script",
+      "--isolated",
+      "--mobile",
+      "--no-sandbox",
+      "--output-dir",
+      "--output-max-size",
+      "--output-mode",
+      "--port",
+      "--proxy-bypass",
+      "--proxy-server",
+      "--sandbox",
+      "--save-session",
+      "--secrets",
+      "--shared-browser-context",
+      "--snapshot-mode",
+      "--storage-state",
+      "--test-id-attribute",
+      "--timeout-action",
+      "--timeout-navigation",
+      "--user-agent",
+      "--user-data-dir",
+      "--version",
+      "--viewport-size"
+    ]
+  }
+}

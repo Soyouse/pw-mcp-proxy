@@ -27,6 +27,7 @@ import http from 'node:http';
 import { EventEmitter } from 'node:events';
 import { sseFeed } from './sse-parse.js';
 import { log } from './logger.js';
+import { describeError } from './error-detail.js';
 
 const SESSION_HEADER = 'mcp-session-id';
 const PROTOCOL_HEADER = 'mcp-protocol-version';
@@ -89,7 +90,9 @@ export class HttpTransport extends EventEmitter {
         JSON.stringify(msg)
       );
     } catch (e) {
-      this._fail('POST request: ' + e.message);
+      // ⚠️ describeError, JAMAIS e.message seul : `err.message` peut etre VIDE sur une erreur
+      // socket, `err.code` ne l'est jamais (incident 01/08 non diagnosticable pour ce seul champ).
+      this._fail('POST request: ' + describeError(e));
       return;
     }
 
@@ -108,7 +111,7 @@ export class HttpTransport extends EventEmitter {
       let body;
       try {
         body = JSON.parse(await this._readAll(res.stream));
-      } catch (e) { this._fail('reponse JSON illisible: ' + e.message); return; }
+      } catch (e) { this._fail('reponse JSON illisible: ' + describeError(e)); return; }
       this._emitMessage(body);
     }
     this._ensureGetStream(); // apres l'init, ouvrir le sens serveur->client
@@ -142,7 +145,7 @@ export class HttpTransport extends EventEmitter {
         }
       }
     } catch (e) {
-      if (!this._closed) log('SSE read err: ' + e.message);
+      if (!this._closed) log('SSE read err: ' + describeError(e));
     }
   }
 

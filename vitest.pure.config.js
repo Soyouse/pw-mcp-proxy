@@ -1,4 +1,4 @@
-// Config vitest DEDIEE aux 4 fichiers de tests des modules PURS (cibles Stryker vitest-runner).
+// Config vitest DEDIEE aux fichiers de tests des modules PURS (cibles Stryker vitest-runner).
 // Referencee explicitement par stryker.conf.json (vitest.configFile) : Stryker ne DOIT jamais
 // tourner sur les tests spawn/integration (I/O reelle, hors mutation par doctrine) -> mutant run
 // sur tout le repo serait a la fois FAUX (mute des fonctions pures via des tests d'I/O sans lien)
@@ -12,11 +12,17 @@ export default defineConfig({
       'tests/pure.test.js',
       'tests/server-registry.test.js',
       'tests/sse-parse.test.js',
+      'tests/listening-line.test.js',
       'tests/log-rotate.test.js',
       'tests/auto-restart.test.js',
       'tests/freeze-report.test.js',
       'tests/budget.test.js',
+      'tests/daemon-protocol.test.js',
       'tests/deadline.test.js',
+      'tests/error-detail.test.js',
+      'tests/channel-name.test.js',
+      'tests/proc-identity-pure.test.js',
+      'tests/clock.test.js',
     ],
     globals: false,
   },

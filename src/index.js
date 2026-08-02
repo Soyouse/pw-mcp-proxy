@@ -10,6 +10,7 @@ import { NdjsonReader } from './jsonrpc.js';
 import { initLogger, log } from './logger.js';
 import { Manager } from './manager.js';
 import { Router } from './router.js';
+import { describeError } from './error-detail.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
@@ -19,26 +20,28 @@ const configPath = process.env.PW_MCP_PROFILES || path.join(root, 'profiles.json
 const logPath = process.env.PW_MCP_LOG || path.join(root, 'pw-mcp-proxy.log');
 
 initLogger(logPath);
-process.on('uncaughtException', (e) => log('uncaughtException: ' + (e?.stack || e)));
-process.on('unhandledRejection', (e) => log('unhandledRejection: ' + (e?.stack || e)));
+// ⚠️ DERNIERS FILETS du process : ce sont les seules traces d'une erreur que PERSONNE n'a rattrapee.
+// `describeError` AVANT la stack — une erreur socket a un `code` (ECONNRESET…) mais souvent un
+// `message` VIDE, et `.stack` seule affiche alors « Error\n at … » sans le moindre indice
+// (exactement l'aveuglement de 5 h du 01/08). Le code d'abord, la stack ensuite pour la localisation.
+process.on('uncaughtException', (e) => log('uncaughtException: ' + describeError(e) + ' | ' + (e?.stack || '')));
+process.on('unhandledRejection', (e) => log('unhandledRejection: ' + describeError(e) + ' | ' + (e?.stack || '')));
 
 const manager = new Manager(configPath);
 const router = new Router(manager, process.stdout, pkg.version);
 
-// MULTI-AGENT : PLUS de lock d'abdication ni de boot-sweep global (ils tueraient le serveur partage
-// qu'un AUTRE agent utilise / feraient abdiquer un proxy vivant). La coordination inter-proxys passe
-// desormais par le SUPERVISEUR (serveurs @playwright/mcp HTTP partages, ref-comptes ; cf supervisor.js).
-// bootSupervision() = boot-reap (purge les serveurs morts/idle d'anciennes sessions) + reaper periodique
-// (dead-man). No-op en mode stdio pur. NE PAS reintroduire de lock/boot-sweep global (regression P0-inverse
-// = casse le multi-agent). Le self-heal d'orphelin est CIBLE dans supervisor.ensureServer.
-await manager.bootSupervision();
+// MULTI-AGENT : PLUS de lock d'abdication ni de boot-sweep global (ils tueraient le serveur
+// partage qu'un AUTRE agent utilise). Il n'y a RIEN a amorcer ici : le DAEMON est lance a la
+// demande par le premier profil HTTP qui en a besoin (cf daemon-client.acquerirProfil), et il
+// s'arrete seul quand plus personne ne le tient. Le boot du proxy est donc redevenu trivial.
 
 let stopping = false;
 async function shutdown(reason) {
   if (stopping) return;
   stopping = true;
   log(reason);
-  try { await manager.stopSupervision(); } catch {} // retire mes heartbeats (ref-count), ne tue aucun serveur partage
+  // ⚠️ Fermer les sockets du daemon (dans stopAll) SUFFIT : il decompte et arrete ce qui n'a plus
+  // de client. Aucun heartbeat a retirer — il n'y en a plus.
   manager.stopAll();
   process.exit(0);
 }

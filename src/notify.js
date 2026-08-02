@@ -8,6 +8,9 @@ import http from 'node:http';
 import https from 'node:https';
 import process from 'node:process';
 import { log } from './logger.js';
+// ⚠️ SOURCE UNIQUE des delais (budget.js) — NE JAMAIS redeclarer une duree ici.
+import { ALERT_TIMEOUT_MS } from './budget.js';
+import { describeError } from './error-detail.js';
 
 // url = résolu CONFIG-FIRST (profiles.json `ntfyUrl`) puis env `PW_MCP_NTFY_URL`. Rien de hardcodé :
 // aucune URL/topic en dur (projet open-source → tout vient de la config de l'utilisateur).
@@ -22,11 +25,11 @@ export function alert(message, url) {
 function sendNtfy(url, msg) {
   try {
     const mod = url.startsWith('http://') ? http : https;
-    const req = mod.request(url, { method: 'POST', timeout: 4000, headers: { Title: 'pw-mcp-proxy' } }, (res) => res.resume());
-    req.on('error', (e) => log('NTFY err: ' + e.message));
+    const req = mod.request(url, { method: 'POST', timeout: ALERT_TIMEOUT_MS, headers: { Title: 'pw-mcp-proxy' } }, (res) => res.resume());
+    req.on('error', (e) => log('NTFY err: ' + describeError(e)));
     req.on('timeout', () => req.destroy());
     req.end(msg);
   } catch (e) {
-    log('NTFY exception: ' + (e?.message || e));
+    log('NTFY exception: ' + describeError(e));
   }
 }

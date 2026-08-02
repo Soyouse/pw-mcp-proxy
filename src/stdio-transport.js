@@ -13,6 +13,7 @@ import { NdjsonReader, writeMessage } from './jsonrpc.js';
 import { log } from './logger.js';
 import { treeKill } from './prockill.js';
 import { resolveShellSpawn } from './spawn-cmd.js';
+import { describeError } from './error-detail.js';
 
 export class StdioTransport extends EventEmitter {
   constructor(profile, spec) {
@@ -37,7 +38,7 @@ export class StdioTransport extends EventEmitter {
       detached: process.platform !== 'win32', // POSIX : pgid = pid => treeKill(-pid) tue Chrome (petit-enfant)
     });
 
-    this.child.on('error', (e) => log(`[backend:${this.profile}] spawn error: ${e.message}`));
+    this.child.on('error', (e) => log(`[backend:${this.profile}] spawn error: ${describeError(e)}`));
 
     this.reader = new NdjsonReader(this.child.stdout);
     this.reader.on('message', (m) => this.emit('message', m));

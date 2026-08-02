@@ -9,14 +9,19 @@ import process from 'node:process';
 import { Backend } from './backend.js';
 import { StdioTransport } from './stdio-transport.js';
 import { HttpTransport } from './http-transport.js';
-import { Supervisor } from './supervisor.js';
 import { log } from './logger.js';
 import { alert } from './notify.js';
-import { sweepByCmd, listProcesses, isPidAlive } from './prockill.js';
+import { sweepByCmd, listProcesses } from './prockill.js';
 import { buildSpec } from './spec.js';
 import { shouldAutoRestart, DEFAULT_MAX_RESTARTS, DEFAULT_WINDOW_MS } from './auto-restart.js';
 import { formatFreezeReport } from './freeze-report.js';
-import { serverEntry } from './server-registry.js';
+// ⚠️ Le DAEMON remplace le superviseur : le ref-count est tenu par le NOYAU (socket ouverte),
+// plus par un registre fichier + heartbeat + TTL. Cf src/server-daemon.js pour le POURQUOI.
+import { acquerirProfil } from './daemon-client.js';
+// ⚠️ SOURCE UNIQUE des delais (budget.js) — NE JAMAIS redeclarer une duree ici.
+import { CONFIG_WATCH_INTERVAL_MS } from './budget.js';
+// ⚠️ describeError : JAMAIS `e.message` seul (il peut etre VIDE — incident 01/08).
+import { describeError } from './error-detail.js';
 
 const DEFAULT_CLIENT_INFO = {
   protocolVersion: '2025-06-18',
@@ -37,13 +42,16 @@ export class Manager {
     this.clientInfo = { ...DEFAULT_CLIENT_INFO }; // remplace au handshake Claude
     this.onNewBackend = null; // set par le Router (wiring des events)
     this.onConfigChange = null; // set par le Router (re-emet tools/list_changed)
-    this.supervisor = null; // lazy : cree au 1er profil HTTP (mode stdio pur => jamais instancie)
     this._watchdogOptions = options.watchdog || {};
     this._autoRestartOptions = {
       maxRestarts: options.autoRestart?.maxRestarts ?? DEFAULT_MAX_RESTARTS,
       windowMs: options.autoRestart?.windowMs ?? DEFAULT_WINDOW_MS,
     };
     this._restartHistory = new Map(); // profile -> number[] timestamps des auto-restarts declenches (anti-boucle)
+    // 🛑 profile -> socket vers le DAEMON. CETTE SOCKET **EST** LE REF-COUNT : tant qu'elle vit, le
+    // daemon sait que CE proxy utilise ce profil. La fermer = « je n'en ai plus besoin » (evenement
+    // du NOYAU, delivre meme sur kill -9). NE JAMAIS la fermer apres avoir lu l'URL.
+    this._connexions = new Map();
     this._loadConfig();
     this._watch();
   }
@@ -54,12 +62,6 @@ export class Manager {
   _isHttp(profile) {
     const p = this.config.profiles[profile] || {};
     return p.http !== undefined ? !!p.http : !!this.config.http;
-  }
-
-  _sup() {
-    // ntfyUrl config-first (comme le Router/notify) : dead-man des serveurs partages (mort inattendue).
-    if (!this.supervisor) this.supervisor = new Supervisor(this.configPath, { ntfyUrl: this.config.ntfyUrl });
-    return this.supervisor;
   }
 
   _loadConfig() {
@@ -74,14 +76,14 @@ export class Manager {
   }
 
   _watch() {
-    fs.watchFile(this.configPath, { interval: 1000 }, async () => {
+    fs.watchFile(this.configPath, { interval: CONFIG_WATCH_INTERVAL_MS }, async () => {
       try {
         this._loadConfig();
         await this._reconcile();
         log('config rechargee (hot-reload)');
         if (this.onConfigChange) this.onConfigChange();
       } catch (e) {
-        log('config reload IGNOREE (invalide) : ' + e.message); // on garde l'ancienne config valide
+        log('config reload IGNOREE (invalide) : ' + describeError(e)); // on garde l'ancienne config valide
       }
     });
   }
@@ -95,7 +97,7 @@ export class Manager {
       if (!this.config.profiles[name]) {
         b.stop();
         this.backends.delete(name);
-        this.supervisor?.unregisterClient(name); // http : je ne suis plus client de ce profil (ref-count)
+        this._closeConnexion(name); // http : je ne suis plus client de ce profil (ref-count noyau)
         continue;
       }
       const newSpec = this._spec(name);
@@ -107,7 +109,7 @@ export class Manager {
           try {
             await this.get(name); // respawn immediat avec la nouvelle spec
           } catch (e) {
-            log(`respawn ${name} echoue: ${e.message}`);
+            log(`respawn ${name} echoue: ${describeError(e)}`);
           }
         }
       }
@@ -190,7 +192,7 @@ export class Manager {
     } catch (e) {
       // Cas "gel grave" (BACKLOG.md) : le respawn lui-meme ne revient pas -> alerte bruyante, jamais
       // un echec silencieux (le proxy resterait mort sans que personne ne le sache).
-      const msg = `pw-mcp-proxy: auto-restart de "${profile}" a ECHOUE (${e?.message || e}) — serveur probablement mort, redemarrage de Claude Code requis.`;
+      const msg = `pw-mcp-proxy: auto-restart de "${profile}" a ECHOUE (${describeError(e)}) — serveur probablement mort, redemarrage de Claude Code requis.`;
       log(msg);
       alert(msg, this.config?.ntfyUrl);
     }
@@ -206,13 +208,10 @@ export class Manager {
     try {
       const cfg = this.config.profiles?.[profile] || {};
       const udd = cfg.userDataDir || null;
+      // ⚠️ Le pid/port du serveur partage n'est PLUS lisible ici : il vit dans le daemon, qui est le
+      // seul a le connaitre (fin du registre fichier). Le DISCRIMINANT du rapport reste intact —
+      // c'est `browserCount` (0 = Chrome mort, >0 = fige), jamais le pid du serveur.
       let serverPid = null, serverAlive = null, port = null, browserCount = null;
-      if (this._isHttp(profile)) {
-        try {
-          const entry = serverEntry(this._sup()._read(), profile);
-          if (entry) { serverPid = entry.pid; port = entry.port; serverAlive = isPidAlive(entry.pid); }
-        } catch {}
-      }
       if (udd) {
         try {
           // Discriminant Chrome mort/fige. Normalise les slashes (Windows \ vs Unix /) pour ne pas
@@ -227,7 +226,7 @@ export class Manager {
       }
       log(formatFreezeReport({ profile, reason: 'unresponsive', serverPid, serverAlive, port, browserCount, missedPings: info.missedPings, inflight: info.inflight }));
     } catch (e) {
-      log(`[freeze-report] echec du diagnostic pour "${profile}": ${e?.message || e}`);
+      log(`[freeze-report] echec du diagnostic pour "${profile}": ${describeError(e)}`);
     }
   }
 
@@ -238,10 +237,59 @@ export class Manager {
   async _makeTransport(profile) {
     const spec = this._spec(profile);
     if (!this._isHttp(profile)) return new StdioTransport(profile, spec);
-    const cfg = this.config.profiles[profile] || {};
-    const url = await this._sup().ensureServer(profile, spec, { userDataDir: cfg.userDataDir });
-    this._sup().registerClient(profile);
+    // ⚠️ Le daemon GARANTIT le serveur (le demarre si besoin, le partage sinon) et rend une socket.
+    // Cette socket EST le ref-count : on la GARDE ouverte, `_release` la fermera. La fermer ici
+    // libererait le profil aussitot et tuerait le navigateur sous l'agent.
+    // `maxBrowsers` (optionnel, absent = illimite) : garde-fou CHOISI par l'utilisateur, applique
+    // par le daemon au LANCEMENT. Il REFUSE un profil de plus, il n'evince jamais.
+    const { url, connexion } = await acquerirProfil(profile, spec, {}, { maxBrowsers: this.config.maxBrowsers });
+    this._closeConnexion(profile); // une SEULE connexion par profil (re-acquisition apres purge)
+    this._connexions.set(profile, connexion);
     return new HttpTransport(url, { protocolVersion: this.clientInfo.protocolVersion, spec });
+  }
+
+  // Ferme MA connexion au daemon pour ce profil = decremente le ref-count. Best-effort et
+  // idempotent : liberer ne doit JAMAIS faire echouer une bascule reussie.
+  _closeConnexion(profile) {
+    const c = this._connexions.get(profile);
+    if (!c) return;
+    this._connexions.delete(profile);
+    try { c.destroy(); } catch (e) { log(`[daemon:${profile}] fermeture: ${describeError(e)}`); }
+  }
+
+  // SEUL chemin de bascule de profil (router._handleSwitch l'appelle ; NE PAS re-ecrire
+  // `manager.activeProfile = x` ailleurs — ce serait sauter la liberation ci-dessous).
+  //
+  // ⚠️ LIBERER L'ANCIEN PROFIL EST OBLIGATOIRE — incident LIVE 2026-08-02 07:15 (boucle de spawn) :
+  // sans ca, le backend quitte RESTAIT dans le pool avec son transport HTTP VIVANT, alors que son
+  // serveur partage venait d'etre reape « idle » (legitime : plus aucun client). Ce transport tapait
+  // dans le vide => backend exited => « purge du cadavre + respawn » => un serveur @playwright/mcp
+  // (+ son Chrome) relance toutes les ~15 s jusqu'a saturer la machine.
+  //
+  // ⚠️ ORDRE OBLIGATOIRE : on n'ouvre le nouveau QU'APRES l'avoir obtenu (get d'abord). Liberer avant
+  // laisserait l'agent SANS AUCUN backend si le nouveau profil echoue a demarrer.
+  // ⚠️ MULTI-AGENT : liberer = fermer MA session (DELETE HTTP) + retirer MON heartbeat. Le serveur
+  // partage survit tant qu'un AUTRE agent le tient (ref-count) ; on ne tue JAMAIS le serveur ici.
+  // Scelle par tests/manager-switch-lifecycle.test.js (invariant N profils : au plus 1 transport ouvert).
+  async setActiveProfile(target) {
+    if (!this.config.profiles[target]) throw new Error(`profil inconnu: ${target}`);
+    const previous = this.activeProfile;
+    await this.get(target); // peut throw : on n'a alors RIEN libere, l'agent garde son backend courant
+    this.activeProfile = target;
+    if (previous && previous !== target) this._release(previous);
+    return target;
+  }
+
+  // Libere un profil dont CE proxy n'est plus client : ferme backend + transport et retire le
+  // heartbeat. Best-effort et idempotent — liberer ne doit jamais faire echouer une bascule reussie.
+  _release(profile) {
+    const b = this.backends.get(profile);
+    if (b) {
+      this.backends.delete(profile); // AVANT stop() : 'close' -> _onBackendUnresponsive ne doit rien retrouver
+      try { b.stop(); } catch (e) { log(`[backend:${profile}] liberation: ${describeError(e)}`); }
+    }
+    // http seulement : fermer ma socket decremente le ref-count tenu par le NOYAU (no-op en stdio).
+    this._closeConnexion(profile);
   }
 
   active() {
@@ -286,27 +334,14 @@ export class Manager {
   stopAll() {
     for (const b of this.backends.values()) b.stop();
     this.backends.clear();
+    // Rendre TOUS mes profils au daemon. La correction n'en depend pas (le noyau ferme les sockets
+    // a la mort du process, meme sur kill -9) — c'est la sortie PROPRE, pas le filet.
+    for (const p of [...this._connexions.keys()]) this._closeConnexion(p);
   }
 
-  // Au moins un profil en mode HTTP (=> supervision de serveurs partages requise) ?
-  _anyHttp() {
-    return Object.keys(this.config.profiles).some((p) => this._isHttp(p));
-  }
-
-  // Boot du multi-agent (HTTP) : boot-reap (purge les serveurs d'anciennes sessions morts/idle) puis
-  // demarre le reaper periodique (dead-man des serveurs partages). No-op en mode stdio pur.
-  // REMPLACE l'ancien boot-sweep global + lock d'abdication (incompatibles avec le serveur partage :
-  // ils tueraient le serveur qu'un AUTRE agent utilise / feraient abdiquer un proxy vivant).
-  async bootSupervision() {
-    if (!this._anyHttp()) return;
-    const s = this._sup();
-    await s.reap();
-    s.startReaper();
-  }
-
-  // Arret propre de CE proxy : retire mes heartbeats + stoppe le reaper. NE tue AUCUN serveur partage
-  // (d'autres agents peuvent l'utiliser) — le reaper s'en charge s'il devient orphelin.
-  async stopSupervision() {
-    if (this.supervisor) await this.supervisor.shutdown();
-  }
+  // ⚠️ PLUS AUCUNE SUPERVISION ICI — supprimee le 02/08 avec le superviseur. Le cycle de vie des
+  // serveurs partages appartient au DAEMON, qui en est le PARENT : il les demarre a la demande et
+  // les arrete quand leur derniere socket se ferme. Il n'y a plus rien a amorcer au boot, plus
+  // rien a purger, plus aucun heartbeat a retirer a l'arret. NE PAS reintroduire de boot-sweep ni
+  // de lock d'abdication : ils tueraient le serveur qu'un AUTRE agent utilise.
 }

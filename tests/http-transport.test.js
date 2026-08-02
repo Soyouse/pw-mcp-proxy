@@ -3,6 +3,7 @@
 // (notif liee + response), flux GET serveur->client, DELETE au close.
 
 import { test, beforeAll, afterAll, expect } from 'vitest';
+import http from 'node:http';
 import { HttpTransport } from '../src/http-transport.js';
 import { startFakeHttpBackend } from './fixtures/fake-http-backend.js';
 

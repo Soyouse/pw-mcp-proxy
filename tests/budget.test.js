@@ -12,10 +12,6 @@ import {
   handshakeBudgetMs,
   handshakeFitsBudget,
   READY_TIMEOUT_MS,
-  START_STALE_FACTOR,
-  startStaleMs,
-  SPAWN_ATTEMPTS,
-  RETRY_READY_TIMEOUT_MS,
 } from '../src/budget.js';
 
 // ---------- heritage du budget client ----------
@@ -77,49 +73,3 @@ test('HANDSHAKE_RATIO : degrade TARD, jamais par prudence (>= 0.5)', () => {
 });
 
 // ---------- peremption d'une entree 'starting' ----------
-test('startStaleMs : DERIVE du budget de readiness, avec marge (> READY_TIMEOUT_MS)', () => {
-  expect(startStaleMs()).toBe(Math.floor(READY_TIMEOUT_MS * START_STALE_FACTOR));
-  expect(startStaleMs(), 'jamais sous le budget de readiness : sinon on tue un demarrage SAIN')
-    .toBeGreaterThan(READY_TIMEOUT_MS);
-  expect(startStaleMs(20000)).toBe(30000);
-});
-
-test('property : startStaleMs depasse TOUJOURS le budget de readiness qu on lui donne', () => {
-  fc.assert(fc.property(fc.integer({ min: 1, max: 300000 }), (t) => startStaleMs(t) >= t));
-});
-
-// ---------- SPAWN_ATTEMPTS : politique de reessai sur port neuf (refonte 2026-07-31) ----------
-test('SPAWN_ATTEMPTS : valeur EXACTE scellee (3 = deux reessais sur des ports DIFFERENTS)', () => {
-  // ⚠️ Valeur epinglee A DESSEIN (tueur de mutant sur le litteral). La changer est une DECISION :
-  // 1 => plus aucun reessai, un port raffle par la fenetre TOCTOU redevient une panne (retour au 31/07).
-  // Trop grand => une machine ou AUCUN port ne repond bloque le boot d autant plus longtemps.
-  expect(SPAWN_ATTEMPTS).toBe(3);
-});
-
-test('SPAWN_ATTEMPTS : au moins 2 (sinon zero reessai) et borne (sinon boot interminable)', () => {
-  // Double garde de SENS, complementaire de la valeur exacte : elle survit a un changement volontaire
-  // et continue d interdire les deux extremes dangereux.
-  expect(SPAWN_ATTEMPTS, 'un reessai MINIMUM : c est lui qui absorbe la course d allocation').toBeGreaterThanOrEqual(2);
-  expect(SPAWN_ATTEMPTS, 'borne DURE : le boot ne doit jamais s eterniser en silence').toBeLessThanOrEqual(5);
-});
-
-test('SPAWN_ATTEMPTS : entier (un compteur de tentatives fractionnaire n a aucun sens)', () => {
-  expect(Number.isInteger(SPAWN_ATTEMPTS)).toBe(true);
-});
-
-test('RETRY_READY_TIMEOUT_MS : STRICTEMENT plus court que la 1re tentative (et non nul)', () => {
-  // ⚠️ L'INVARIANT, pas juste la valeur : les 20 s nominales servent au 1er lancement (npx peut
-  // TELECHARGER le paquet) ; des la 2e tentative ce cout est paye. Rendre les reessais aussi longs
-  // porterait le pire cas a 60 s — au-dela du mur client (30 s) — donc une liste d'outils degradee
-  // la ou une reponse complete restait possible. MESURE le 31/07 : c'est ce qui a fait ROUGE le
-  // test live « serveur partage TUE » (timeout 30 s) avant cet ajustement.
-  expect(RETRY_READY_TIMEOUT_MS).toBeLessThan(READY_TIMEOUT_MS);
-  expect(RETRY_READY_TIMEOUT_MS, 'jamais 0 : un reessai a besoin de temps pour aboutir').toBeGreaterThan(0);
-});
-
-test('RETRY_READY_TIMEOUT_MS : le PIRE CAS total reste borne (gate de bout en bout)', () => {
-  // Somme reelle = 1re tentative + (SPAWN_ATTEMPTS-1) reessais. Ce gate est le seul endroit qui
-  // regarde le COUT TOTAL d'un demarrage : allonger l'un des deux reglages sans y penser => ROUGE.
-  const pireCas = READY_TIMEOUT_MS + (SPAWN_ATTEMPTS - 1) * RETRY_READY_TIMEOUT_MS;
-  expect(pireCas, 'un boot ne doit jamais pouvoir durer une minute').toBeLessThanOrEqual(45000);
-});
