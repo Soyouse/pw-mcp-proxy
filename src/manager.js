@@ -19,6 +19,8 @@ import { formatFreezeReport } from './freeze-report.js';
 import { serverEntry } from './server-registry.js';
 // ⚠️ SOURCE UNIQUE des delais (budget.js) — NE JAMAIS redeclarer une duree ici.
 import { CONFIG_WATCH_INTERVAL_MS } from './budget.js';
+// ⚠️ describeError : JAMAIS `e.message` seul (il peut etre VIDE — incident 01/08).
+import { describeError } from './error-detail.js';
 
 const DEFAULT_CLIENT_INFO = {
   protocolVersion: '2025-06-18',
@@ -83,7 +85,7 @@ export class Manager {
         log('config rechargee (hot-reload)');
         if (this.onConfigChange) this.onConfigChange();
       } catch (e) {
-        log('config reload IGNOREE (invalide) : ' + e.message); // on garde l'ancienne config valide
+        log('config reload IGNOREE (invalide) : ' + describeError(e)); // on garde l'ancienne config valide
       }
     });
   }
@@ -109,7 +111,7 @@ export class Manager {
           try {
             await this.get(name); // respawn immediat avec la nouvelle spec
           } catch (e) {
-            log(`respawn ${name} echoue: ${e.message}`);
+            log(`respawn ${name} echoue: ${describeError(e)}`);
           }
         }
       }
@@ -192,7 +194,7 @@ export class Manager {
     } catch (e) {
       // Cas "gel grave" (BACKLOG.md) : le respawn lui-meme ne revient pas -> alerte bruyante, jamais
       // un echec silencieux (le proxy resterait mort sans que personne ne le sache).
-      const msg = `pw-mcp-proxy: auto-restart de "${profile}" a ECHOUE (${e?.message || e}) — serveur probablement mort, redemarrage de Claude Code requis.`;
+      const msg = `pw-mcp-proxy: auto-restart de "${profile}" a ECHOUE (${describeError(e)}) — serveur probablement mort, redemarrage de Claude Code requis.`;
       log(msg);
       alert(msg, this.config?.ntfyUrl);
     }
@@ -229,7 +231,7 @@ export class Manager {
       }
       log(formatFreezeReport({ profile, reason: 'unresponsive', serverPid, serverAlive, port, browserCount, missedPings: info.missedPings, inflight: info.inflight }));
     } catch (e) {
-      log(`[freeze-report] echec du diagnostic pour "${profile}": ${e?.message || e}`);
+      log(`[freeze-report] echec du diagnostic pour "${profile}": ${describeError(e)}`);
     }
   }
 

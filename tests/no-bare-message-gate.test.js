@@ -23,7 +23,14 @@ const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src')
 
 // Fichiers d'I/O ou une erreur remonte d'un pair distant / du noyau : ce sont EXACTEMENT
 // ceux dont l'erreur peut avoir un message vide et un code parlant.
-const IO_FILES = ['http-transport.js', 'stdio-transport.js', 'supervisor.js', 'notify.js', 'backend.js'];
+// ⚠️ LISTE ELARGIE le 2026-08-02 : `router.js` et `manager.js` en etaient ABSENTS, et le gate a
+// donc laisse passer 8 sites — dont `backend actif indisponible: ${e.message}`, qui est le message
+// que CLAUDE LIT quand tout casse. Un gate au perimetre trop etroit rassure sans proteger.
+// ⚠️ Tout fichier qui journalise une erreur ou en renvoie une au client DOIT figurer ici.
+const IO_FILES = [
+  'http-transport.js', 'stdio-transport.js', 'supervisor.js', 'notify.js', 'backend.js',
+  'router.js', 'manager.js', 'proc-identity.js', 'launch-channel.js', 'logger.js', 'prockill.js',
+];
 
 // `.message` utilise dans une CONCATENATION ou une INTERPOLATION (donc destine a etre affiche).
 // ⚠️ `\??\.` OBLIGATOIRE : la 1re version de ce gate ratait `e?.message` — c'etait PRECISEMENT
