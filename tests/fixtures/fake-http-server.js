@@ -4,6 +4,11 @@
 // Volontairement minimal : le superviseur ne teste QUE le cycle de vie (spawn/ready/reap), pas le MCP.
 
 import http from 'node:http';
+import { exigerSousTest } from './sous-test.js';
+
+// 🛑 FAILS-CLOSED, EN TOUT PREMIER : rien n'est ouvert avant cette ligne, donc rien a nettoyer
+// si on refuse. Une fixture lancee hors harnais echappe au ratchet et survit indefiniment.
+exigerSousTest('tests/fixtures/fake-http-server.js');
 
 const argv = process.argv.slice(2);
 function opt(name, def) {

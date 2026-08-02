@@ -10,6 +10,11 @@
 // Tools exposes : echo_<tag>, notify_<tag> (emet une notif), ask_<tag> (requete server->client).
 
 import process from 'node:process';
+import { exigerSousTest } from './sous-test.js';
+
+// 🛑 FAILS-CLOSED, EN TOUT PREMIER : rien n'est ouvert avant cette ligne, donc rien a nettoyer
+// si on refuse. Une fixture lancee hors harnais echappe au ratchet et survit indefiniment.
+exigerSousTest('tests/fixtures/fake-backend.js');
 
 const tagIdx = process.argv.indexOf('--tag');
 const TAG = tagIdx !== -1 ? process.argv[tagIdx + 1] : 'X';

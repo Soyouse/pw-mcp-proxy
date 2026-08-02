@@ -6,6 +6,19 @@
 import { test, expect } from 'vitest';
 import { spawn } from 'node:child_process';
 import process from 'node:process';
+import path from 'node:path';
+import net from 'node:net';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/** Le port repond-il ? Question au NOYAU — jamais « le process a l air lance ». */
+const portOuvert = (port) => new Promise((r) => {
+  const s = net.connect(port, 'localhost');
+  const fin = (v) => { s.destroy(); r(v); };
+  s.on('connect', () => fin(true));
+  s.on('error', () => fin(false));
+});
 import { spawnTracked, reapAll, isPidAlive, survivors, PROC_MARK } from './harness.js';
 
 const SLEEP = ['-e', 'setTimeout(() => {}, 60000)']; // process node qui vit 60s sauf si tué
@@ -62,3 +75,42 @@ async function untilAlive(pid, ms = 3000) {
   }
   return false;
 }
+
+// 🛑 LE TROU QUE LE RATCHET NE VOIT PAS : une fixture lancée A LA MAIN (hors harnais) n'est pas
+// marquée, donc invisible du ratchet, donc elle SURVIT indéfiniment. Vécu le 02/08 — un faux
+// backend oublié 1 h après une sonde manuelle, découvert par hasard.
+// La parade n'est pas une consigne mais un REFUS AU DÉMARRAGE, prouvé ici dans les deux sens.
+test('FIXTURE LANCÉE HORS TEST : refus immédiat, aucun process qui traîne', async () => {
+  const fixture = path.join(__dirname, 'fixtures', 'fake-backend.js');
+  // ⚠️ Environnement SANS `PWMCP_TEST` : on simule exactement une commande tapée à la main.
+  const env = { ...process.env };
+  delete env.PWMCP_TEST;
+  delete env.PWMCP_FIXTURE_MANUELLE;
+  const p = spawn(process.execPath, [fixture, '--tag', 'X', '--host', 'localhost', '--port', '39901'], {
+    stdio: ['ignore', 'ignore', 'pipe'], env,
+  });
+  let err = '';
+  p.stderr.setEncoding('utf8');
+  p.stderr.on('data', (c) => { err += c; });
+  const code = await new Promise((r) => p.on('exit', r));
+
+  expect(code, 'code de sortie DISTINCT (3) : reconnaissable, jamais confondu avec un succès').toBe(3);
+  expect(err, "le message doit dire QUOI FAIRE, pas seulement refuser").toMatch(/PWMCP_FIXTURE_MANUELLE/);
+  expect(await portOuvert(39901), "RIEN ne doit avoir été ouvert : on refuse AVANT tout descripteur").toBe(false);
+}, 20000);
+
+// NEGATIVE-CHECK du garde-fou lui-même : sous test, la fixture DOIT démarrer normalement.
+// Sans ce test, un verrou trop strict casserait toute la suite sans qu'on sache pourquoi.
+test('FIXTURE SOUS TEST : démarre normalement (le garde-fou ne bloque pas le cas légitime)', async () => {
+  const fixture = path.join(__dirname, 'fixtures', 'fake-backend.js');
+  const p = spawnTracked([fixture, '--tag', 'X', '--host', 'localhost', '--port', '39902'], {
+    stdio: ['ignore', 'ignore', 'ignore'],
+  });
+  const t0 = Date.now();
+  let ouvert = false;
+  while (Date.now() - t0 < 15000 && !(ouvert = await portOuvert(39902))) {
+    await new Promise((r) => { const t = setTimeout(r, 50); t.unref?.(); });
+  }
+  expect(ouvert, 'sous harnais, la fixture doit servir normalement').toBe(true);
+  p.kill();
+}, 20000);

@@ -29,16 +29,31 @@ const onWin = process.platform === 'win32';
 // QUE ses propres process marqués. Injecté comme token argv (visible dans la cmdline => scannable).
 export const PROC_MARK = `PWMCP_TEST_${process.pid}`;
 
+// 🛑 LE PROCESS DE TEST LUI-MÊME EST « SOUS TEST ». Importer ce harnais, c'est en être un.
+// ⚠️ SANS CETTE LIGNE, le marqueur n'existe que chez les ENFANTS de `spawnTracked` : un test qui
+// lance le daemon EN DIRECT (acceptance, daemon-client) transmet son propre env — qui ne l'a pas —
+// et la fixture au bout de la chaîne REFUSE de démarrer. Mesuré : 7 tests rouges d'un coup.
+// C'est ici que la propriété devient TRANSITIVE (test -> daemon -> gardien -> fixture).
+process.env.PWMCP_TEST = process.env.PWMCP_TEST || PROC_MARK;
+
 const tracked = new Set(); // ChildProcess spawnés directement par ce fichier
 
 // spawnTracked : SEUL point d'entrée autorisé pour spawner un process node dans un test.
 // - injecte PROC_MARK en fin d'argv (les fixtures/index.js parsent par indexOf/env => token en trop OK)
+// - 🛑 injecte AUSSI `PWMCP_TEST` dans l'ENVIRONNEMENT. L'argv ne marque QUE l'enfant direct ;
+//   l'env, lui, est HÉRITÉ par tout l'arbre (proxy -> daemon -> gardien -> fixture). C'est ce qui
+//   permet aux fixtures de REFUSER de démarrer hors test (fail-closed) — voir fake-backend.js.
+//   Sans ça, une fixture lancée A LA MAIN survit indéfiniment sans que le ratchet la voie : c'est
+//   arrivé le 02/08 (un faux backend oublié 1 h après une sonde manuelle).
 // - detached POSIX => group leader tuable en arbre ; sur Windows treeKill fait `taskkill /T`
 // - auto-retrait du Set à l'exit (pas de faux survivant)
 export function spawnTracked(args, opts = {}) {
   const child = spawn(process.execPath, [...args, PROC_MARK], {
     detached: !onWin,
     ...opts,
+    // ⚠️ APRÈS `...opts` : un test qui passe son propre `env` ne doit JAMAIS pouvoir
+    // désarmer le marqueur par inadvertance (fails-closed, comme le ratchet).
+    env: { ...process.env, ...(opts.env || {}), PWMCP_TEST: PROC_MARK },
   });
   tracked.add(child);
   child.once('exit', () => tracked.delete(child));
