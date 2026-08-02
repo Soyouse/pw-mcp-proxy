@@ -1,0 +1,41 @@
+# RÈGLE — « une comparaison d'horodatage EST une inférence » (ast-grep, analyse AST réelle)
+#
+# ⚠️ COMPLÈTE no-undeclared-timing.yml, ne le remplace pas. L'autre détecte les APPELS temporels
+# (setTimeout/setInterval/setImmediate) ; celle-ci détecte le RAISONNEMENT temporel :
+#     now - lastSeen > ttl   =>  « ce client est probablement mort »
+#     Date.now() - mtime > LOCK_STALE_MS  =>  « ce verrou est probablement périmé »
+#
+# POURQUOI ELLE EXISTE (mesuré le 02/08/2026) : le budget d'inférence affichait 7 points temporels
+# et se croyait exhaustif. Il en manquait 7 AUTRES — invisibles parce qu'ils ne contiennent AUCUN
+# appel temporel. Pire : les 3 comparaisons sur LOCK_STALE_MS sont l'inférence EXACTE qui a produit
+# la panne de 5 h du 31/07→01/08 (péremption/vol de verrou), et le gate censé la surveiller ne la
+# voyait pas. Un module PUR qui reçoit `now` en paramètre est parfaitement testable ET parfaitement
+# inférentiel : la pureté ne rend pas une supposition vraie.
+#
+# La question reste la même : QUI SAIT ? En LOCAL le noyau répond par ÉVÉNEMENT (fin de processus,
+# fermeture de socket, EADDRINUSE) — un horodatage n'est qu'une TRACE de ce qui était vrai avant.
+# Motifs recevables identiques : "distant" (aucune autorité joignable) · "indécidable" (arrêt).
+#
+# ⚠️ La contrainte sur $NOW (regex /[Nn]ow/) évite de matcher les soustractions non temporelles
+#    (offsets, tailles, index). Elle capture `now - t` comme `Date.now() - t0`.
+# ⚠️ AST et jamais regex : une comparaison citée dans un commentaire ou une chaîne ne matche pas.
+
+id: no-temporal-inference
+language: JavaScript
+severity: error
+message: "Comparaison d'horodatage = inférence — qui SAIT ? (motif recevable : distant ou indécidable)"
+note: |
+  `now - t > seuil` ne CONSTATE rien : il SUPPOSE, à partir d'une trace périmée.
+  LOCAL   -> le noyau répond exactement et par événement : l'inférence est un BUG.
+  DISTANT -> aucune autorité joignable : légitime, à déclarer dans le budget du gate.
+  ⚠️ Une inférence ne doit JAMAIS commander une action destructive (kill/purge/reset).
+  Voir memory feedback-interroger-ce-qui-sait + skill pw-mcp-proxy §DÉCISION D'ARCHITECTURE.
+rule:
+  any:
+    - pattern: $NOW - $T > $LIMIT
+    - pattern: $NOW - $T >= $LIMIT
+    - pattern: $NOW - $T < $LIMIT
+    - pattern: $NOW - $T <= $LIMIT
+constraints:
+  NOW:
+    regex: '[Nn]ow'

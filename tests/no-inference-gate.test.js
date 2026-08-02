@@ -78,7 +78,26 @@ function binAstGrep() {
  *    linter avec `severity: error`). NE PAS traiter ça comme un échec : le JSON attendu est
  *    dans `err.stdout`. Sans ce catch, le gate échoue toujours — y compris quand tout va bien.
  */
-function scanAst() {
+// ⚠️ CACHE PAR RÈGLE — OBLIGATOIRE, ne pas retirer. Chaque test appelait son propre scan : avec
+// 2 règles × 5 tests, ça faisait 6 spawns d'ast-grep par run. Le code source ne change pas PENDANT
+// le run, donc 5 de ces scans étaient du gaspillage pur — et sur une machine chargée ils suffisaient
+// à faire déborder les attentes des tests réseau voisins (mesuré 02/08 : http-transport.test.js
+// vert seul en 183 ms, ROUGE en suite à 18 s). Un gate ne doit jamais coûter assez cher pour
+// faire rougir un AUTRE test : une suite qui rougit au hasard est une suite qu'on cesse de lire.
+// `_invalider()` existe pour les negative-checks, qui eux modifient src/ en cours de run.
+const _cache = new Map();
+function _invalider() { _cache.clear(); }
+
+// ⚠️ Règle passée en PARAMÈTRE (un fichier YAML), jamais un pattern en argv : sur Windows
+// l'invocation passe par cmd.exe qui découperait le pattern à l'espace (piège mesuré le 02/08).
+function scanRule(rule) {
+  if (_cache.has(rule)) return _cache.get(rule);
+  const res = _scanRuleUncached(rule);
+  _cache.set(rule, res);
+  return res;
+}
+
+function _scanRuleUncached(rule) {
   const bin = binAstGrep();
   const base = bin.startsWith('npx') ? ['ast-grep'] : [];
   const opts = {
@@ -89,7 +108,7 @@ function scanAst() {
   };
   let out;
   try {
-    out = execFileSync(bin, [...base, 'scan', '-r', RULE, 'src', '--json=compact'], opts);
+    out = execFileSync(bin, [...base, 'scan', '-r', rule, 'src', '--json=compact'], opts);
   } catch (err) {
     if (typeof err.stdout !== 'string') throw err; // vrai échec (binaire absent, règle invalide)
     out = err.stdout;
@@ -102,8 +121,62 @@ function scanAst() {
   return par;
 }
 
+// ═══ VOLET 2 : le RAISONNEMENT temporel (`now - t > seuil`) ═══════════════════════════════════
+//
+// ⚠️ ANGLE MORT COMBLÉ LE 02/08/2026. Le volet 1 ci-dessus ne détecte que les APPELS temporels.
+// Il se croyait exhaustif avec 7 points — il en manquait 7 AUTRES, sans aucun setTimeout dedans :
+//   server-registry.js x3  « ce client vit-il ? ce démarrage a-t-il abouti ? »  (module PUR !)
+//   supervisor.js      x3  LOCK_STALE_MS — l'inférence EXACTE de la panne de 5 h du 31/07→01/08,
+//                          que le gate censé la surveiller ne voyait PAS
+//   supervisor.js      x1  boucle de poll ready
+// Leçon : un module PUR qui reçoit `now` en paramètre est parfaitement testable ET parfaitement
+// inférentiel. La pureté rend une supposition VÉRIFIABLE, jamais VRAIE.
+const BUDGET_INFERENCE = {
+  'server-registry.js': {
+    max: 3,
+    motif: 'DETTE',
+    pourquoi:
+      "⛔ NON JUSTIFIÉ — « ce client bat-il encore ? » est 100 % LOCAL : la fermeture de sa " +
+      'connexion au canal nommé est un ÉVÉNEMENT exact du noyau. Cible : 0 (refcount).',
+  },
+  'supervisor.js': {
+    max: 4,
+    motif: 'DETTE',
+    pourquoi:
+      '⛔ NON JUSTIFIÉ — 3x péremption de verrou (LOCK_STALE_MS) + 1x poll de readiness. Le canal ' +
+      'nommé rend le verrou périmé IMPOSSIBLE par construction (le noyau le détruit à la mort du ' +
+      'processus). Cible : 0. Cf skill §DÉCISION D\'ARCHITECTURE.',
+  },
+};
+
+function scanInference() {
+  return scanRule(path.join(ROOT, 'rules', 'no-temporal-inference.yml'));
+}
+
+test('aucune comparaison d horodatage dans un fichier NON déclaré (une inférence se déclare aussi)', { timeout: 30000 }, () => {
+  const clandestins = Object.entries(scanInference()).filter(([f]) => !BUDGET_INFERENCE[f]);
+  expect(
+    clandestins,
+    `Comparaison d'horodatage dans un fichier non déclaré : ${clandestins.map(([f, n]) => `${f}(${n})`).join(', ')}\n` +
+      `→ \`now - t > seuil\` ne CONSTATE rien, il SUPPOSE. QUI SAIT ? Local ⇒ le noyau, par événement.\n` +
+      `→ Si vraiment "distant" ou "indécidable", le déclarer dans BUDGET_INFERENCE avec sa justification.`
+  ).toEqual([]);
+});
+
+test('CLIQUET INFÉRENCE : aucun fichier déclaré ne dépasse son budget de comparaisons', { timeout: 30000 }, () => {
+  const par = scanInference();
+  const debordements = Object.entries(BUDGET_INFERENCE)
+    .map(([f, b]) => ({ f, max: b.max, n: par[f] || 0 }))
+    .filter(({ n, max }) => n > max);
+  expect(
+    debordements,
+    `Budget d'inférence dépassé : ${debordements.map((d) => `${d.f} ${d.n}>${d.max}`).join(', ')}\n` +
+      `→ NE PAS augmenter le budget pour faire passer ce test. Le cliquet ne DESCEND que.`
+  ).toEqual([]);
+});
+
 test('aucun appel temporel dans un fichier NON déclaré (le temps se déclare)', { timeout: 30000 }, () => {
-  const clandestins = Object.entries(scanAst()).filter(([f]) => !BUDGET[f]);
+  const clandestins = Object.entries(scanRule(RULE)).filter(([f]) => !BUDGET[f]);
   expect(
     clandestins,
     `Appel temporel dans un fichier non déclaré : ${clandestins.map(([f, n]) => `${f}(${n})`).join(', ')}\n` +
@@ -113,7 +186,7 @@ test('aucun appel temporel dans un fichier NON déclaré (le temps se déclare)'
 });
 
 test('CLIQUET : aucun fichier déclaré ne dépasse son budget', { timeout: 30000 }, () => {
-  const par = scanAst();
+  const par = scanRule(RULE);
   const debordements = Object.entries(BUDGET)
     .map(([f, b]) => ({ f, max: b.max, n: par[f] || 0 }))
     .filter(({ n, max }) => n > max);
@@ -145,8 +218,23 @@ test('les constantes temporelles restent dans la SOURCE UNIQUE (budget.js)', () 
 });
 
 test('la DETTE reste visible et ne grossit pas (supervisor.js : cible = 0)', { timeout: 30000 }, () => {
-  const n = scanAst()['supervisor.js'] || 0;
+  const n = scanRule(RULE)['supervisor.js'] || 0;
   expect(n, `supervisor.js : ${n} délais LOCAUX (cible 0). Ne jamais remonter.`).toBeLessThanOrEqual(
     BUDGET['supervisor.js'].max
   );
+});
+
+// ⚠️ NEGATIVE-CHECK OBLIGATOIRE (anti-gate-creux) : la règle du volet 2 est neuve — prouver
+// qu'elle VOIT réellement une inférence introduite, sinon le budget ci-dessus ne vaut rien.
+test('NEGATIVE-CHECK volet 2 : une comparaison d horodatage introduite est DÉTECTÉE', { timeout: 30000 }, () => {
+  const leurre = path.join(ROOT, 'src', '__gate_probe_inference.js');
+  fs.writeFileSync(leurre, 'export function stale(now, seen, ttl) {\n  return now - seen > ttl;\n}\n');
+  try {
+    _invalider(); // src/ vient de changer : le cache du run ne vaut plus
+    const vu = Object.keys(scanInference()).includes('__gate_probe_inference.js');
+    expect(vu, 'la règle DOIT voir `now - seen > ttl` introduit dans src/').toBe(true);
+  } finally {
+    fs.unlinkSync(leurre);
+    _invalider(); // ⚠️ sinon un test suivant lirait un cache CONTAMINÉ par le leurre
+  }
 });
