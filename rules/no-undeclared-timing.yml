@@ -28,6 +28,16 @@ note: |
   Voir skill pw-mcp-proxy §DÉCISION D'ARCHITECTURE + memory feedback-interroger-ce-qui-sait.
 rule:
   any:
+    # Forme NUE : `setTimeout(...)`, y compris l'import de `node:timers/promises`.
     - pattern: setTimeout($$$ARGS)
     - pattern: setInterval($$$ARGS)
     - pattern: setImmediate($$$ARGS)
+    # ⚠️ Forme QUALIFIÉE : `globalThis.setTimeout(...)`, `window.setTimeout(...)`,
+    #    `timers.setTimeout(...)`. NE JAMAIS RETIRER CES TROIS LIGNES.
+    #    Ajoutées le 02/08/2026 : en portant cette règle sur `infra-mcp`, le NEGATIVE-CHECK a
+    #    prouvé que la version d'origine (formes nues seules) laissait passer
+    #    `globalThis.setTimeout`. Le contournement que le passage à l'AST était censé fermer
+    #    restait donc OUVERT ici aussi. Un gate qu'on n'a pas saboté ne prouve rien.
+    - pattern: $OBJ.setTimeout($$$ARGS)
+    - pattern: $OBJ.setInterval($$$ARGS)
+    - pattern: $OBJ.setImmediate($$$ARGS)

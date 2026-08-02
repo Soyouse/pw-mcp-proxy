@@ -12,6 +12,7 @@ export default defineConfig({
       'tests/pure.test.js',
       'tests/server-registry.test.js',
       'tests/sse-parse.test.js',
+      'tests/listening-line.test.js',
       'tests/log-rotate.test.js',
       'tests/auto-restart.test.js',
       'tests/freeze-report.test.js',
