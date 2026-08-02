@@ -17,6 +17,7 @@ export default defineConfig({
       'tests/auto-restart.test.js',
       'tests/freeze-report.test.js',
       'tests/budget.test.js',
+      'tests/daemon-protocol.test.js',
       'tests/deadline.test.js',
       'tests/error-detail.test.js',
       'tests/channel-name.test.js',

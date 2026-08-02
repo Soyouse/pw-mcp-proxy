@@ -22,7 +22,8 @@
     "src/channel-name.js",
     "src/proc-identity-pure.js",
     "src/clock.js",
-    "src/listening-line.js"
+    "src/listening-line.js",
+    "src/daemon-protocol.js"
   ],
   "reporters": [
     "clear-text",
