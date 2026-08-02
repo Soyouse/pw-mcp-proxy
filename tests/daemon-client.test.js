@@ -9,6 +9,7 @@ import net from 'node:net';
 import os from 'node:os';
 import { acquerirProfil } from '../src/daemon-client.js';
 import { daemonChannelName } from '../src/channel-name.js';
+import { listProcesses } from '../src/prockill.js';
 import { taggedArgs } from './harness.js'; // ⚠️ marque les process spawnés par le CODE (ratchet)
 
 // Faux serveur : ouvre le port qu'on lui donne, répond à tout, ne meurt pas seul.
@@ -84,3 +85,45 @@ test('un SECOND daemon ne peut pas naître : le canal est unique par utilisateur
   expect(b.url).not.toBe(a.url); // profils distincts => serveurs distincts…
   expect(daemonChannelName(e), '…mais UN SEUL canal, donc UN SEUL daemon').toBe(daemonChannelName(e));
 }, 60000);
+
+// 🛑 LE TEST DE L ORPHELIN — la panne que `child-guard.js` rend IMPOSSIBLE.
+// Un daemon tue a `-9` ne peut RIEN nettoyer : c'est tout l'enjeu. Sans gardien, son serveur
+// survivrait en tenant son `--user-data-dir` a vie => « browser is already in use », profil mort
+// jusqu'a une intervention humaine. Le gardien tient le stdin du daemon : sa mort ferme le tuyau,
+// l'EOF arrive, le serveur tombe. Aucun balayage, aucun jugement sur des process existants.
+// ⚠️ CE QUE CE TEST VAUT, SELON L'OS — mesuré par negative-check le 02/08 :
+//   POSIX (Linux/macOS) : DISCRIMINANT. Rien n'y tue les enfants d'un parent mort ⇒ sans gardien,
+//     le serveur survivrait et ce test rougirait. C'est en CI (matrice 3 OS) qu'il fait son travail.
+//   WINDOWS : NON DISCRIMINANT — il reste VERT même gardien retiré, car Windows place les enfants
+//     dans le JOB OBJECT du parent et les tue avec lui. L'orphelin ne s'y reproduit pas.
+// ⇒ NE PAS conclure « le gardien marche » d'un vert obtenu sous Windows. Le MÉCANISME lui-même
+// (EOF ⇒ l'enfant meurt) est prouvé sur tous les OS par `tests/child-guard.test.js`.
+// ⚠️ NE JAMAIS neutraliser ce test pour « accelerer » : en CI POSIX, c'est lui qui tient la ligne.
+test('DAEMON TUE BRUTALEMENT (-9) : son serveur ne SURVIT PAS (zéro orphelin)', async () => {
+  const e = env();
+  const { url, connexion } = await acquerirProfil('orphelin', spec(), e);
+  ouvertes.push(connexion);
+  const port = Number(new URL(url).port);
+
+  // Le serveur existe VRAIMENT (on l'identifie par le port qu'il sert, pas par un registre).
+  const avant = listProcesses().find((p) => p.cmd.includes(`--port ${port}`));
+  expect(avant, 'préalable : un process sert bien ce port').toBeTruthy();
+
+  // ⚠️ CIBLER LE BON DAEMON, par SON canal : chaque test de ce fichier lance le sien (canal unique
+  // par test). Chercher « daemon-main.js » tout court tuerait celui du voisin — et le test
+  // conclurait à un orphelin alors que le mécanisme marche (piège vécu ici même).
+  const canal = daemonChannelName(e);
+  const daemon = listProcesses().find((p) => p.cmd.includes('daemon-main.js') && p.cmd.includes(canal));
+  expect(daemon, `le daemon du canal ${canal} est identifiable`).toBeTruthy();
+  process.kill(daemon.pid, 'SIGKILL');
+
+  // Le serveur DOIT disparaître, sans que personne ne le lui demande.
+  const t0 = Date.now();
+  let survivant = true;
+  while (Date.now() - t0 < 15000) {
+    survivant = listProcesses().some((p) => p.cmd.includes(`--port ${port}`));
+    if (!survivant) break;
+    await new Promise((r) => { const t = setTimeout(r, 100); t.unref?.(); });
+  }
+  expect(survivant, 'ORPHELIN : le serveur a survécu à la mort brutale de son daemon').toBe(false);
+}, 40000);

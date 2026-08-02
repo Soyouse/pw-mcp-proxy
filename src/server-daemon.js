@@ -23,7 +23,6 @@ import { spawn } from 'node:child_process';
 import { NdjsonReader, writeMessage } from './jsonrpc.js';
 import { daemonChannelName, channelIsFile } from './channel-name.js';
 import { validerRequete, reponseOk, reponseErreur, lireLimite, placeDisponible } from './daemon-protocol.js';
-import { resolveShellSpawn } from './spawn-cmd.js';
 import { allocateEphemeralPort } from './port-alloc.js';
 import { attendreReady } from './readiness.js';
 import { treeKill } from './prockill.js';
@@ -31,6 +30,11 @@ import { describeError } from './error-detail.js';
 import { log } from './logger.js';
 import { READY_TIMEOUT_MS } from './budget.js';
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// ⚠️ Chemin ABSOLU du gardien : il est lance depuis un daemon dont le cwd est quelconque.
+const CHILD_GUARD = path.join(path.dirname(fileURLToPath(import.meta.url)), 'child-guard.js');
 
 const BIND_HOST = 'localhost'; // défaut documenté ; le client se connecte sur le MÊME hôte
 const URL_HOST = 'localhost'; // ⚠️ JAMAIS 127.0.0.1 : validation du Host header ⇒ 403
@@ -164,10 +168,20 @@ export class ServerDaemon {
   async _demarrerServeur(profil, spec) {
     const port = await this._allouerPort();
     const rawArgs = [...spec.args, '--host', BIND_HOST, '--port', String(port)];
-    const { command, args, shell } = resolveShellSpawn(spec.command, rawArgs);
-    // ⚠️ ENFANT, PAS détaché : le daemon EST le parent, c'est ce qui rend l'identité `(pid,
-    // starttime)` inutile — un PID recyclé ne peut pas se glisser ici, on ne tue que notre enfant.
-    const child = this._spawn(command, args, { stdio: 'ignore', windowsHide: true, shell });
+    // 🛑 ON NE LANCE JAMAIS LE SERVEUR DIRECTEMENT : on lance un GARDIEN (`child-guard.js`) qui le
+    // porte. Le gardien tient notre stdin ; si CE daemon meurt brutalement (`kill -9`, OOM), le
+    // noyau ferme le tuyau, le gardien recoit EOF et tue le serveur. L'ORPHELIN — un serveur qui
+    // survit sans parent en tenant son `--user-data-dir` a vie — devient IMPOSSIBLE, sans le
+    // moindre balayage au demarrage ni aucun jugement sur des process existants.
+    // ⚠️ NE JAMAIS re-spawner le serveur en direct « pour economiser un process » : on rachèterait
+    // cette classe de pannes. ⚠️ `stdio[0]='pipe'` EST le lien de vie — ne pas le passer a 'ignore'.
+    // ⚠️ Le gardien est lance NU (chemin absolu de node, aucun shell) : a travers un shell, le
+    // tuyau appartiendrait a `cmd.exe` et l'EOF n'atteindrait jamais le gardien. C'est LUI qui
+    // resout le shell pour la vraie commande (via `spawn-cmd.js`, source unique).
+    const child = this._spawn(process.execPath, [CHILD_GUARD, spec.command, ...rawArgs], {
+      stdio: ['pipe', 'ignore', 'ignore'],
+      windowsHide: true,
+    });
     child.on('error', (e) => log(`[daemon:${profil}] spawn: ${describeError(e)}`));
     const pid = child.pid;
     if (!pid) throw new Error(`profil ${profil} : spawn avorté (aucun pid)`);
