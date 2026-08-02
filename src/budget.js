@@ -92,16 +92,16 @@ export const READY_POLL_MS = 200; // periode de sondage pendant cette attente
 // READY_TIMEOUT_MS et surtout interrompue par un FAIT (process mort) — cf readiness.js.
 export const PROBE_TIMEOUT_MS = 2000;
 
-// Marge au-dela de laquelle une entree `starting` du registre est declaree MORTE-NEE.
-// LIEN CAUSAL REEL (c'est pour ca qu'elle DERIVE) : passe le budget de readiness, un serveur qui n'a
-// toujours pas ete promu ne le sera JAMAIS — le proxy qui le pollait est mort avant de le promouvoir.
-// Le facteur > 1 couvre l'ecart entre le spawn et le debut du poll (jamais un reap d'un demarrage sain).
-
-
-// ⚠️ Delais RAPATRIES ici par le gate statique  (31/07) : ils vivaient en dur
-// dans manager.js et notify.js. Aucun n'etait faux — mais c'est EXACTEMENT la dispersion couche par
-// couche qui a coute la connexion MCP du 31/07 (chaque couche son delai, aucune vue d'ensemble).
-// Un delai invisible depuis ce fichier est un delai que personne ne pourra arbitrer le jour ou il faudra.
+// ⚠️ Delais RAPATRIES ici par le gate statique (31/07) : ils vivaient en dur dans manager.js et
+// notify.js. Aucun n'etait faux — mais c'est EXACTEMENT la dispersion couche par couche qui a coute
+// la connexion MCP du 31/07 (chaque couche son delai, aucune vue d'ensemble). Un delai invisible
+// depuis ce fichier est un delai que personne ne pourra arbitrer le jour ou il faudra.
+//
+// 🛑 CONSTANTES SUPPRIMEES LE 02/08 AVEC LE REGISTRE ET LE SUPERVISEUR — ne pas les reintroduire :
+// `LOCK_STALE_MS`, `SERVER_TTL_MS`, `HEARTBEAT_MS`, `SPAWN_ATTEMPTS`, `RETRY_READY_TIMEOUT_MS`,
+// `startStaleMs`. Elles repondaient toutes a « ce truc distant est-il encore vivant ? », question
+// que le refcount du noyau rend SANS OBJET (une socket fermee est un FAIT, pas une estimation).
+// ⚠️ En avoir besoin a nouveau = le signal qu'un registre est revenu par la fenetre.
 
 // Periode de scrutation du fichier de config (hot-reload). fs.watchFile POLLE : trop court = reveils
 // inutiles a la seconde ; trop long = un changement de profil met des secondes a etre vu. 1 s = compromis

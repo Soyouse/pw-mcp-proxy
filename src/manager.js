@@ -139,7 +139,7 @@ export class Manager {
     // sessionId perime => re-initialize prend un 404 avale par l'idempotence de _onExit => promesse
     // eternelle => appel MCP qui pend 120 s ; stdio : child mort). NE JAMAIS le ranimer : on le purge
     // et on reconstruit backend + transport FRAIS (nouvelle session HTTP via _makeTransport, qui
-    // re-registerClient aupres du superviseur). stop() = close best-effort (DELETE session, treeKill stdio).
+    // re-acquiert le profil aupres du daemon). stop() = close best-effort (DELETE session, treeKill stdio).
     if (b && b.exited) {
       // LOG SIGNAL (traçabilité incident) : c'est cette ligne qui rend le remplacement VISIBLE dans
       // pw-mcp-proxy.log — le bug du 23/07 n'a été trouvé QUE grâce aux logs. NE PAS la retirer.
@@ -239,10 +239,10 @@ export class Manager {
     }
   }
 
-  // Fabrique le transport d'un profil. Mode HTTP (MULTI-AGENT) : le superviseur GARANTIT le serveur
-  // partage (spawn/adopt) AVANT d'injecter un HttpTransport client + enregistre CE proxy (ref-count).
-  // Mode stdio (defaut) : child MCP prive au proxy (tests, backends custom). userDataDir passe au
-  // superviseur pour le self-heal d'un orphelin (cf supervisor.ensureServer).
+  // Fabrique le transport d'un profil.
+  // Mode HTTP (MULTI-AGENT) : le DAEMON garantit le serveur partage (le demarre ou le partage) et
+  // rend une socket AVANT qu'on injecte un HttpTransport client — cette socket EST le ref-count.
+  // Mode stdio (defaut) : child MCP prive au proxy (tests, backends custom), aucun daemon implique.
   async _makeTransport(profile) {
     const spec = this._spec(profile);
     if (!this._isHttp(profile)) return new StdioTransport(profile, spec);

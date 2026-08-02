@@ -29,7 +29,7 @@ export class StdioTransport extends EventEmitter {
 
   async start() {
     // Resolution cross-OS centralisee (spawn-cmd.js) : shell:true + quoting pour une commande bare
-    // (`npx`) sur Windows, sinon shell:false. SOURCE UNIQUE partagee avec supervisor.js.
+    // (`npx`) sur Windows, sinon shell:false. SOURCE UNIQUE partagee avec child-guard.js.
     const { command, args, shell } = resolveShellSpawn(this.spec.command, this.spec.args);
     this.child = spawn(command, args, {
       stdio: ['pipe', 'pipe', 'pipe'],

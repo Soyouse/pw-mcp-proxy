@@ -8,11 +8,11 @@
 // diagnostic accusait le serveur. Une hypothese fausse mais vraie 99 fois sur 100 = la pire categorie de
 // defaut : invisible jusqu'au jour ou elle coute une journee.
 //
-// ⚠️ LA REGLE, desormais : LE PROXY NE CHOISIT JAMAIS UN NUMERO DE PORT. Il le DEMANDE a l'OS, qui ne
-// rend que des ports reellement libres. C'est la pratique de l'industrie pour un serveur local (Chrome
-// avec --remote-debugging-port=0 + DevToolsActivePort, Jupyter avec son fichier de connexion) : le port
-// est ALLOUE puis PUBLIE, jamais devine. Ici la publication se fait dans le registre partage, que tous
-// les agents lisent deja — d'ou un changement minuscule pour une immunite totale a cette classe de panne.
+// ⚠️ LA REGLE, desormais : ON NE CHOISIT JAMAIS UN NUMERO DE PORT. On le DEMANDE a l'OS, qui ne rend
+// que des ports reellement libres. C'est la pratique de l'industrie pour un serveur local (Chrome avec
+// --remote-debugging-port=0 + DevToolsActivePort, Jupyter avec son fichier de connexion) : le port est
+// ALLOUE puis PUBLIE, jamais devine. Ici le port n'est PUBLIE nulle part sur disque : le DAEMON le
+// garde EN MEMOIRE et le rend a chaque proxy qui acquiert le profil. C'est lui, le rendez-vous.
 //
 // ⚠️ « port 0 » = contrat POSIX **et** Windows (Winsock : « the service provider assigns a unique port
 // from the dynamic client port range »). Surface DOCUMENTEE et identique sur les 3 OS de la matrice CI :
@@ -57,7 +57,7 @@ export function allocateEphemeralPort(hote = HOTE_PAR_DEFAUT) {
     srv.listen(0, hote, () => {
       const addr = srv.address();
       // `address()` rend un objet {port} pour un socket TCP. Defensif : si l'OS rendait autre chose
-      // (cas non documente), on refuse plutot que de propager un port invalide dans le registre.
+      // (cas non documente), on refuse plutot que de propager un port invalide jusqu'au `--port`.
       const port = addr && typeof addr === 'object' ? addr.port : null;
       srv.close(() => {
         if (typeof port === 'number' && port > 0) resolve(port);

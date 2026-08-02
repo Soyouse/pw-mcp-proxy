@@ -45,9 +45,9 @@ export class HttpTransport extends EventEmitter {
     this._getOpened = false;
   }
 
-  // Interface commune des transports. Rien a demarrer cote HTTP : le serveur partage vit deja (garanti
-  // par supervisor.ensureServer AVANT l'injection de ce transport). La session s'ouvre au 1er send
-  // (initialize) qui capture le MCP-Session-Id ; le flux GET serveur->client s'ouvre ensuite.
+  // Interface commune des transports. Rien a demarrer cote HTTP : le serveur partage vit DEJA — le
+  // DAEMON l'a garanti PRET (`acquerirProfil`) avant que ce transport soit construit. La session
+  // s'ouvre au 1er send (initialize) qui capture le MCP-Session-Id ; le flux GET serveur->client ensuite.
   async start() {}
 
   _headers(base) {

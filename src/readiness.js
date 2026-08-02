@@ -1,9 +1,9 @@
 // I/O — « ce serveur est-il joignable ? », en interrogeant CE QUI SAIT.
 //
-// ⚠️ SOURCE UNIQUE, partagée par le superviseur (aujourd'hui) et le daemon (demain). Extrait de
-// `supervisor.js` le 02/08 AVANT d'écrire le daemon, précisément pour ne pas en avoir deux
-// versions : une logique de readiness dupliquée, c'est la garantie qu'on corrigera l'une et pas
-// l'autre — et le bug ne se manifesterait alors que sur un seul des deux chemins.
+// ⚠️ SOURCE UNIQUE de la question « est-il prêt ? ». Extraite le 02/08 AVANT d'écrire le daemon,
+// précisément pour ne jamais en avoir deux versions : une logique de readiness dupliquée, c'est la
+// garantie qu'on corrigera l'une et pas l'autre — et le bug ne se manifesterait alors que sur un
+// seul des deux chemins. Consommateur unique aujourd'hui : `server-daemon.js`.
 //
 // 🛑 LE BUDGET EST UN FILET, PAS UN COUPERET. Deux des trois issues sont des FAITS EXACTS du
 // noyau, obtenus SANS délai ; la troisième seule est indécidable :

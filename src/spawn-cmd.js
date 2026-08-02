@@ -3,9 +3,11 @@
 // echoue (ENOENT sur `npx.cmd`). Il faut `shell:true` + quoter les arguments a espaces. Un binaire
 // absolu `.exe`/`.com` se lance SANS shell (un shell casserait sur un chemin a espaces non quote).
 //
-// ⚠️ SOURCE UNIQUE de cette decision : consommee par stdio-transport.js ET supervisor.js. NE PAS
+// ⚠️ SOURCE UNIQUE de cette decision : consommee par stdio-transport.js ET child-guard.js. NE PAS
 // dupliquer la logique ailleurs (une copie qui derive = un spawn qui casse sur un seul des deux chemins,
-// exactement le bug reproduit 2026-07-13 : le superviseur spawnait `npx` en shell:false => jamais pret).
+// exactement le bug reproduit 2026-07-13 : `npx` spawne en shell:false => serveur jamais pret).
+// ⚠️ C'est le GARDIEN qui resout le shell, jamais le daemon : lance a travers un shell, le gardien
+// verrait son stdin appartenir a `cmd.exe` et l'EOF n'arriverait jamais (cf child-guard.js).
 
 // Retourne { command, args, shell } prets pour child_process.spawn.
 export function resolveShellSpawn(command, args = [], platform = process.platform) {

@@ -93,69 +93,24 @@ export function runtimeDir(platform = process.platform, env = process.env) {
 }
 
 /**
- * Nom du canal de lancement pour un profil, selon la plateforme.
- *
- * Windows : `\\.\pipe\pw-mcp-<profil>` — espace de noms dedie, aucune limite pratique de longueur,
- *           detruit par le noyau a la mort du dernier handle.
- * POSIX   : `<tmpdir>/pw-mcp-<profil>.sock` — le FICHIER survit a un crash (contrairement au pipe
- *           Windows) ; c'est a l'appelant de traiter l'orpheline par `connect` → ECONNREFUSED →
- *           `unlink` → re-`listen`. JAMAIS par un TTL.
- *
- * @param {string} profile
- * @param {{platform?: NodeJS.Platform, tmpdir?: string, userInfo?: object|null}} [env] injecte pour rendre la fonction TESTABLE
- *        sur les deux plateformes depuis n'importe quelle machine (determinisme des tests).
- * @returns {string}
- */
-export function channelName(profile, env = {}) {
-  const platform = env.platform || process.platform;
-  const enc = encodeProfile(profile);
-  if (enc === '') throw new Error('channelName: nom de profil vide');
-
-  // ⚠️ Segment UTILISATEUR obligatoire sur les DEUX plateformes (cf `userSegment`) : sur Windows
-  // l'espace de noms des pipes est GLOBAL a la machine, donc deux comptes se marcheraient dessus.
-  const who = encodeProfile(userSegment(env.userInfo || null));
-
-  if (platform === 'win32') {
-    // Espace de noms des named pipes : jamais de chemin de fichier, jamais de limite sun_path.
-    return `\\\\.\\pipe\\${PREFIX}${who}-${enc}`;
-  }
-
-  // ⚠️ `$XDG_RUNTIME_DIR` AVANT `os.tmpdir()`, et ce n'est PAS un detail de confort :
-  // `systemd-tmpfiles` supprime par defaut ce qui n'a pas ete touche depuis **10 jours** dans
-  // `/tmp` (doc officielle systemd.io/TEMPORARY_DIRECTORIES). Un serveur actif depuis 2 semaines
-  // verrait donc son fichier socket EFFACE SOUS LUI alors qu'il vit ⇒ un nouveau proxy reussirait
-  // son `listen()` ⇒ **DEUX lanceurs simultanes** ⇒ double spawn ⇒ « browser is already in use ».
-  // La garantie d'exclusion du canal saute exactement au moment ou elle compte : la longue duree.
-  // `$XDG_RUNTIME_DIR` est le repertoire prevu pour ca (sockets/pipes), en mode 0700 — donc il
-  // corrige AUSSI le fait qu'une socket dans /tmp est lisible par les autres utilisateurs locaux.
-  // ⚠️ `env.tmpdir` reste prioritaire : c'est l'injection des TESTS, jamais un chemin de prod.
-  const dir = env.tmpdir || runtimeDir(platform);
-  const full = path.join(dir, `${PREFIX}${who}-${enc}.sock`);
-  if (Buffer.byteLength(full) > SUN_PATH_MAX) {
-    // ⚠️ FAILS-CLOSED. NE PAS "resoudre" en hachant le nom : un hash reintroduit la collision,
-    // donc le partage de navigateur entre deux identites. Renommer le profil est la bonne reponse.
-    throw new Error(
-      `channelName: chemin de socket trop long (${Buffer.byteLength(full)} > ${SUN_PATH_MAX}) ` +
-        `pour le profil "${profile}" — raccourcir le nom du profil.`
-    );
-  }
-  return full;
-}
-
-/**
  * Nom du canal du DAEMON UNIQUE (un seul par utilisateur, tous profils confondus).
  *
- * ⚠️ NON-COLLISION PAR CONSTRUCTION, pas par convention. Le nom omet le segment de profil :
- *   profil  -> `<PREFIX><user>-<profil>`   (channelName, jamais vide : elle throw sur profil vide)
- *   daemon  -> `<PREFIX><user>`            (ici)
- * Aucun profil ne peut donc produire le nom du daemon. **NE PAS "simplifier" en reservant un nom
- * de profil du type `_daemon`** : un utilisateur a le droit d'appeler son profil `_daemon`, et la
- * collision ferait dialoguer un proxy avec le mauvais interlocuteur — exactement la classe de
- * faute que le percent-encoding reversible existe pour interdire. Injectivite property-testee.
+ * 🛑 IL N'Y A QU'UN SEUL CANAL, ET IL N'EST PAS DERIVE DU PROFIL. Le daemon est unique par
+ * UTILISATEUR : c'est lui qui connait le port de chaque profil, en memoire. Un canal PAR PROFIL
+ * (`channelName`) a existe jusqu'au 02/08/2026 — vestige de l'architecture « un verrou de
+ * lancement par profil » — puis est devenu du CODE MORT a l'arrivee du daemon unique, et a ete
+ * SUPPRIME (verifie par `git grep` : plus aucun consommateur hors de son propre test).
+ * ⚠️ NE PAS le reintroduire « pour isoler les profils » : l'isolation entre identites est portee
+ * par le `--user-data-dir`, jamais par le canal. Un 2e canal ne ferait que rendre deux daemons
+ * possibles, donc deux spawns pour un meme profil.
  *
- * Meme regles que channelName pour le reste : segment UTILISATEUR obligatoire (espace de noms des
- * pipes global a la machine sur Windows) et `$XDG_RUNTIME_DIR` avant `/tmp` sur POSIX
- * (systemd-tmpfiles purge /tmp a 10 jours ⇒ socket effacee sous un daemon VIVANT ⇒ deux daemons).
+ * ⚠️ Segment UTILISATEUR obligatoire : sur Windows l'espace de noms des named pipes est GLOBAL a
+ * la machine (doc Microsoft), donc deux comptes se marcheraient dessus. Sur POSIX,
+ * `$XDG_RUNTIME_DIR` avant `/tmp` — `systemd-tmpfiles` purge `/tmp` a 10 jours, ce qui effacerait
+ * la socket SOUS un daemon VIVANT ⇒ un second `listen()` reussirait ⇒ DEUX daemons ⇒ double spawn.
+ * ⚠️ L'encodage du segment utilisateur reste REVERSIBLE (jamais un hash) : deux comptes distincts
+ * doivent produire deux canaux distincts, par construction et non par chance. Injectivite
+ * property-testee.
  */
 export function daemonChannelName(env = {}) {
   const platform = env.platform || process.platform;

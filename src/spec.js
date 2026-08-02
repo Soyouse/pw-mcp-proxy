@@ -1,9 +1,10 @@
 // spec.js — construction de la commande backend d'un profil. PUR => testable + mutable.
 // C'est la DECISION « quels args passer a @playwright/mcp » (caps, isolated, user-data-dir, override
-// backend, args libres). Isolee de l'I/O (spawn/supervisor) pour passer au crible Stryker.
+// backend, args libres). Isolee de toute I/O (spawn) pour passer au crible Stryker.
 //
-// ⚠️ NE construit PAS --host/--port : en mode HTTP le PORT est runtime (choisi par supervisor.js selon
-// le registre partage). Le superviseur ajoute --host/--port a ces args. buildSpec = tout SAUF le port.
+// ⚠️ NE construit PAS --host/--port : ce sont des valeurs RUNTIME. Le port est ALLOUE PAR L'OS
+// (`port-alloc.js`) puis ajoute aux args par le DAEMON (`server-daemon.js`), qui est le seul a le
+// connaitre — il le garde en memoire, il n'y a plus aucun registre. buildSpec = tout SAUF le port.
 
 export const DEFAULT_BACKEND = { command: 'npx', args: ['-y', '@playwright/mcp@latest'] };
 

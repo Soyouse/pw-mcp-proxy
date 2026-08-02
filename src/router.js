@@ -237,26 +237,43 @@ export class Router {
       : '';
   }
 
-  _switchTool(collisions = []) {
-    const profs = this.manager.profileList();
-    const listed = profs.map((p) => `"${p.name}"${p.label ? ` (${p.label})` : ''}`).join(', ');
+  // Fabrique un tool maison qui prend UN nom de profil en argument (switch + restart).
+  // ⚠️ SOURCE UNIQUE du schema d'entree « un profil » : l'`enum` des profils DOIT rester en phase
+  // avec `profileList()` — deux copies divergeraient, et un profil ajoute a chaud n'apparaitrait
+  // que dans l'un des deux tools, en silence. (jscpd voyait ici 3 clones : c'etait le symptome.)
+  _toolProfil(canonical, { title, description, descArg }, collisions) {
     return {
-      name: exposedName('switch_profile', collisions),
-      title: 'Changer de profil de navigateur',
-      description:
-        `Bascule le navigateur actif vers un profil isole (compte/identite separes, cookies/session non partages). ` +
-        `Les outils browser_* agissent ENSUITE dans ce profil. ` +
-        `Profil actif: "${this.manager.activeProfile}". Profils disponibles: ${listed}.` +
-        this._collisionNote('switch_profile', collisions),
+      name: exposedName(canonical, collisions),
+      title,
+      description: description + this._collisionNote(canonical, collisions),
       inputSchema: {
         type: 'object',
         properties: {
-          profile: { type: 'string', description: 'Nom du profil cible.', enum: profs.map((p) => p.name) },
+          profile: { type: 'string', description: descArg, enum: this.manager.profileList().map((p) => p.name) },
         },
         required: ['profile'],
         additionalProperties: false,
       },
     };
+  }
+
+  _switchTool(collisions = []) {
+    const listed = this.manager
+      .profileList()
+      .map((p) => `"${p.name}"${p.label ? ` (${p.label})` : ''}`)
+      .join(', ');
+    return this._toolProfil(
+      'switch_profile',
+      {
+        title: 'Changer de profil de navigateur',
+        description:
+          `Bascule le navigateur actif vers un profil isole (compte/identite separes, cookies/session non partages). ` +
+          `Les outils browser_* agissent ENSUITE dans ce profil. ` +
+          `Profil actif: "${this.manager.activeProfile}". Profils disponibles: ${listed}.`,
+        descArg: 'Nom du profil cible.',
+      },
+      collisions
+    );
   }
 
   // current_profile : outil LECTURE SEULE. Son RESULTAT est frais a chaque appel
@@ -278,97 +295,77 @@ export class Router {
   // restart_profile : outil de MAINTENANCE. Interception LEGITIME (action sur l'etat du proxy
   // lui-meme, meme famille que switch/current) — pas une violation du passthrough.
   _restartTool(collisions = []) {
-    const profs = this.manager.profileList();
-    return {
-      name: exposedName('restart_profile', collisions),
-      title: 'Redemarrer le backend d un profil',
-      description:
-        `Force le redemarrage du navigateur d'un profil : tue son backend + son Chrome et respawn propre. ` +
-        `A utiliser si un profil est BLOQUE ("Browser is already in use for ...") ou si ses commandes browser_* PENDENT. ` +
-        `N'affecte QUE le profil cible (les autres profils et le navigateur perso restent intacts).` +
-        this._collisionNote('restart_profile', collisions),
-      inputSchema: {
-        type: 'object',
-        properties: {
-          profile: { type: 'string', description: 'Nom du profil a redemarrer.', enum: profs.map((p) => p.name) },
-        },
-        required: ['profile'],
-        additionalProperties: false,
+    return this._toolProfil(
+      'restart_profile',
+      {
+        title: 'Redemarrer le backend d un profil',
+        description:
+          `Force le redemarrage du navigateur d'un profil : tue son backend + son Chrome et respawn propre. ` +
+          `A utiliser si un profil est BLOQUE ("Browser is already in use for ...") ou si ses commandes browser_* PENDENT. ` +
+          `N'affecte QUE le profil cible (les autres profils et le navigateur perso restent intacts).`,
+        descArg: 'Nom du profil a redemarrer.',
       },
-    };
+      collisions
+    );
   }
 
-  async _handleRestart(msg) {
-    const target = msg.params?.arguments?.profile;
-    const avail = this.manager.profileList().map((p) => p.name);
-    if (!target || !this.manager.config.profiles[target]) {
-      return this._send({
-        jsonrpc: '2.0',
-        id: msg.id,
-        result: { content: [{ type: 'text', text: `Profil inconnu: ${target}. Disponibles: ${avail.join(', ')}` }], isError: true },
-      });
+  // Reponse `tools/call` maison : un contenu texte + le drapeau d'erreur, rien d'autre.
+  // SOURCE UNIQUE de cette forme — la re-ecrire ailleurs, c'est risquer un `isError` oublie, donc
+  // un ECHEC que le modele lit comme un SUCCES.
+  _repondreTexte(msg, texte, isError) {
+    this._send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: texte }], isError } });
+  }
+
+  // Squelette COMMUN des deux tools maison qui AGISSENT sur un profil (switch + restart).
+  // ⚠️ Factorise le 02/08 (jscpd voyait 3 clones ici) — mais l'enjeu n'est PAS la duplication :
+  // c'est que les trois etapes ci-dessous doivent rester SOLIDAIRES. Un handler ecrit a part
+  // oublierait tot ou tard l'une d'elles, et l'oubli le plus grave est SILENCIEUX :
+  //   ① valider le profil AVANT d'agir  ⇒ jamais d'action sur un profil inexistant ;
+  //   ② `describeError` sur l'echec     ⇒ jamais un message vide (incident du 01/08) ;
+  //   ③ `tools/list_changed` au SUCCES  ⇒ la description « Profil actif » suit la realite.
+  // 🛑 ③ EST CRITIQUE ET VAUT POUR LES DEUX : sans elle, Claude garde une description CACHEE qui
+  // ment sur le profil courant ⇒ action sur le mauvais compte Google (incident 2026-06-02). Pour
+  // `restart`, l'instance de backend a change : meme raison, coherence. NE JAMAIS la retirer.
+  async _agirSurProfil(msg, { action, succes, echec }) {
+    const cible = msg.params?.arguments?.profile;
+    if (!cible || !this.manager.config.profiles[cible]) {
+      const dispo = this.manager.profileList().map((p) => p.name).join(', ');
+      return this._repondreTexte(msg, `Profil inconnu: ${cible}. Disponibles: ${dispo}`, true);
     }
     try {
-      await this.manager.restartProfile(target);
-      const label = this.manager.config.profiles[target].label || target;
-      this._send({
-        jsonrpc: '2.0',
-        id: msg.id,
-        result: { content: [{ type: 'text', text: `Profil "${target}" (${label}) redemarre : verrou libere, backend neuf operationnel.` }], isError: false },
-      });
-      // Le backend actif a pu changer d'instance -> forcer Claude a re-tirer tools/list (coherence).
-      this.notifyToolsChanged();
+      await action(cible);
+      const label = this.manager.config.profiles[cible].label || cible;
+      this._repondreTexte(msg, succes(cible, label), false);
+      this.notifyToolsChanged(); // ③ — cf ci-dessus, OBLIGATOIRE
     } catch (e) {
-      this._send({
-        jsonrpc: '2.0',
-        id: msg.id,
-        result: { content: [{ type: 'text', text: `Echec du redemarrage de "${target}": ${describeError(e)}` }], isError: true },
-      });
+      this._repondreTexte(msg, echec(cible, describeError(e)), true); // ②
     }
+  }
+
+  _handleRestart(msg) {
+    return this._agirSurProfil(msg, {
+      action: (p) => this.manager.restartProfile(p),
+      succes: (p, label) => `Profil "${p}" (${label}) redemarre : verrou libere, backend neuf operationnel.`,
+      echec: (p, err) => `Echec du redemarrage de "${p}": ${err}`,
+    });
+  }
+
+  _handleSwitch(msg) {
+    return this._agirSurProfil(msg, {
+      // ⚠️ `setActiveProfile`, JAMAIS `get()` + affectation directe : la methode LIBERE aussi
+      // l'ancien profil (ferme son transport, rend sa socket au daemon). Sauter cette liberation =
+      // le backend quitte survit en zombie et respawn en boucle (incident 02/08). Scelle par le
+      // gate AST `no-direct-active-profile`.
+      action: (p) => this.manager.setActiveProfile(p),
+      succes: (p, label) => `Profil actif: "${p}" (${label}). Les outils browser_* agissent maintenant dans ce profil.`,
+      echec: (p, err) => `Echec du switch vers "${p}": ${err}`,
+    });
   }
 
   _handleCurrentProfile(msg) {
     const name = this.manager.activeProfile;
     const label = this.manager.config.profiles[name]?.label || name;
-    this._send({
-      jsonrpc: '2.0',
-      id: msg.id,
-      result: { content: [{ type: 'text', text: `Profil actif: "${name}" (${label}).` }], isError: false },
-    });
-  }
-
-  async _handleSwitch(msg) {
-    const target = msg.params?.arguments?.profile;
-    const avail = this.manager.profileList().map((p) => p.name);
-    if (!target || !this.manager.config.profiles[target]) {
-      return this._send({
-        jsonrpc: '2.0',
-        id: msg.id,
-        result: { content: [{ type: 'text', text: `Profil inconnu: ${target}. Disponibles: ${avail.join(', ')}` }], isError: true },
-      });
-    }
-    try {
-      // ⚠️ setActiveProfile, JAMAIS `get()` + affectation directe : la methode LIBERE aussi l'ancien
-      // profil (ferme son transport + retire le heartbeat). Sauter cette liberation = le backend
-      // quitte survit en zombie et respawn en boucle (incident 02/08, cf manager.setActiveProfile).
-      await this.manager.setActiveProfile(target);
-      const label = this.manager.config.profiles[target].label || target;
-      this._send({
-        jsonrpc: '2.0',
-        id: msg.id,
-        result: { content: [{ type: 'text', text: `Profil actif: "${target}" (${label}). Les outils browser_* agissent maintenant dans ce profil.` }], isError: false },
-      });
-      // OBLIGATOIRE : un switch change le profil ACTIF -> on force Claude a re-tirer tools/list,
-      // ce qui rafraichit la description "Profil actif" (sinon elle reste figee/cachee = mensonge).
-      // C'est la racine de l'incident 2026-06-02 (action sur le mauvais compte). NE PAS retirer.
-      this.notifyToolsChanged();
-    } catch (e) {
-      this._send({
-        jsonrpc: '2.0',
-        id: msg.id,
-        result: { content: [{ type: 'text', text: `Echec du switch vers "${target}": ${describeError(e)}` }], isError: true },
-      });
-    }
+    this._repondreTexte(msg, `Profil actif: "${name}" (${label}).`, false);
   }
 
   notifyToolsChanged() {
