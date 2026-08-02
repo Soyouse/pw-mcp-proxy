@@ -10,8 +10,13 @@ import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { acquireLaunchChannel } from '../src/launch-channel.js';
 import { channelName } from '../src/channel-name.js';
+// ⚠️ spawnTracked = SEUL moyen de spawner dans un test (marqueur + ratchet anti-fuite).
+import { spawnTracked } from './harness.js';
+
+const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'orphan-socket.js');
 
 // Profil UNIQUE par test : deux tests qui partagent un canal se contamineraient
 // (meme piege que l'isolation de port du supervisor, corrige le 22/07).
@@ -127,13 +132,21 @@ test.skipIf(!posix)('POSIX : socket ORPHELINE d un crash ⇒ nettoyee et reprise
   const profile = uniq();
   const name = channelName(profile);
 
-  // Fabrique une orpheline REELLE : un serveur qui a ecoute puis dont le process a disparu
-  // sans close() — on reproduit l'etat sur disque (fichier present, personne a l'ecoute).
-  await new Promise((r) => {
-    const s = net.createServer();
-    s.listen(name, () => s.close(r)); // close() laisse le fichier sur POSIX
+  // ⚠️ ORPHELINE FABRIQUEE PAR UNE MORT BRUTALE, jamais par `close()`.
+  // La 1re version de ce test utilisait `s.close()` en supposant que le fichier survivait :
+  // FAUX, Node l'efface au close. Le test etait vert sur Windows (branche skippee) et ROUGE au
+  // premier run CI ubuntu/macOS du 2026-08-02. C'est le TEST qui mentait, pas le code — mais il
+  // ne prouvait donc RIEN du chemin de recuperation POSIX. Seul un SIGKILL laisse l'orpheline.
+  const child = spawnTracked([FIXTURE, `--sock=${name}`]);
+  await new Promise((resolve, reject) => {
+    child.stdout.on('data', (d) => String(d).includes('READY') && resolve());
+    child.stderr.on('data', (d) => reject(new Error(`fixture: ${String(d).trim()}`)));
+    child.on('exit', (c) => reject(new Error(`fixture sortie prematuree code=${c}`)));
   });
-  expect(fs.existsSync(name)).toBe(true);
+  child.kill('SIGKILL'); // mort sans close ⇒ le noyau NE nettoie PAS le fichier socket
+  await new Promise((resolve) => child.on('exit', resolve)); // evenement, pas d'attente arbitraire
+
+  expect(fs.existsSync(name), 'orpheline bien presente sur disque').toBe(true);
 
   // ⚠️ La reprise passe par `connect` → ECONNREFUSED (fait EXACT du noyau : personne n'ecoute),
   //    jamais par « ce fichier a l'air vieux ».
