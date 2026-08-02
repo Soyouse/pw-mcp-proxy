@@ -62,3 +62,18 @@ export function describeError(err) {
   if (parts.length) return `[${parts.join(' ')}]`;
   return '<no error>'; // objet sans aucun champ exploitable : on le DIT, on ne rend pas ''
 }
+
+/**
+ * Pile d'appel d'une erreur, SANS JAMAIS supposer que c'en est une.
+ *
+ * ⚠️ RAISON D'ETRE, trouvee par `tsc --checkJs` le 02/08 : sur `unhandledRejection`, la raison est
+ * de type INCONNU — `Promise.reject('boum')` est parfaitement legal. Lire `.stack` dessus rendait
+ * `undefined` en SILENCE, donc un log tronque au moment precis ou on en a besoin.
+ * Fonction TOTALE : rend toujours une chaine, jamais d'exception.
+ * @param {unknown} err
+ * @returns {string} la pile, ou '' si l'objet n'en porte pas
+ */
+export function stackOf(err) {
+  const s = err && typeof err === 'object' ? /** @type {{stack?:unknown}} */ (err).stack : null;
+  return typeof s === 'string' ? s : '';
+}

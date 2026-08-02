@@ -42,7 +42,8 @@ const URL_HOST = 'localhost'; // ⚠️ JAMAIS 127.0.0.1 : validation du Host he
 export class ServerDaemon {
   /**
    * @param {{env?:object, spawnFn?:Function, tuer?:Function, allouerPort?:Function,
-   *          attendre?:Function, budgetMs?:number}} [options] injections pour les tests
+   *          attendre?:Function, budgetMs?:number, nomCanal?:string, onArret?:Function,
+   *          limite?:number|string}} [options] injections des tests + parametres imposes par le lanceur
    */
   constructor(options = {}) {
     this.env = options.env || {};
@@ -80,7 +81,9 @@ export class ServerDaemon {
   async demarrer() {
     const srv = net.createServer();
     const pris = await new Promise((resolve, reject) => {
-      srv.once('error', (e) => {
+      srv.once('error', (/** @type {NodeJS.ErrnoException} */ e) => {
+        // ⚠️ `ErrnoException`, pas `Error` : c'est `e.code` qui porte le FAIT (`EADDRINUSE`), et
+        // le type `Error` ne le declare pas — meme logique que l'interdiction de `err.message` nu.
         if (e.code === 'EADDRINUSE') return resolve(false);
         // ⚠️ Toute AUTRE erreur remonte : une permission refusée ne doit jamais être confondue
         // avec « quelqu'un d'autre est déjà là ».

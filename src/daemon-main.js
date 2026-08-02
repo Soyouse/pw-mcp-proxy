@@ -18,13 +18,13 @@ import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 import { initLogger, log } from './logger.js';
 import { ServerDaemon } from './server-daemon.js';
-import { describeError } from './error-detail.js';
+import { describeError, stackOf } from './error-detail.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 initLogger(process.env.PW_MCP_LOG || path.join(__dirname, '..', 'pw-mcp-proxy.log'));
 
-process.on('uncaughtException', (e) => log('daemon uncaughtException: ' + describeError(e) + ' | ' + (e?.stack || '')));
-process.on('unhandledRejection', (e) => log('daemon unhandledRejection: ' + describeError(e) + ' | ' + (e?.stack || '')));
+process.on('uncaughtException', (e) => log('daemon uncaughtException: ' + describeError(e) + ' | ' + stackOf(e)));
+process.on('unhandledRejection', (e) => log('daemon unhandledRejection: ' + describeError(e) + ' | ' + stackOf(e)));
 
 // ⚠️ LE NOM DU CANAL EST IMPOSÉ PAR LE LANCEUR (argv[2]), il n'est PAS recalculé ici.
 // Le client l'a déjà calculé pour tenter de s'y connecter : le recalculer serait une SECONDE

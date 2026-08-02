@@ -102,7 +102,7 @@ export function runtimeDir(platform = process.platform, env = process.env) {
  *           `unlink` → re-`listen`. JAMAIS par un TTL.
  *
  * @param {string} profile
- * @param {{platform?: string, tmpdir?: string}} [env] injecte pour rendre la fonction TESTABLE
+ * @param {{platform?: NodeJS.Platform, tmpdir?: string, userInfo?: object|null}} [env] injecte pour rendre la fonction TESTABLE
  *        sur les deux plateformes depuis n'importe quelle machine (determinisme des tests).
  * @returns {string}
  */

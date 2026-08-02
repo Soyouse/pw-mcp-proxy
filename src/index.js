@@ -10,7 +10,7 @@ import { NdjsonReader } from './jsonrpc.js';
 import { initLogger, log } from './logger.js';
 import { Manager } from './manager.js';
 import { Router } from './router.js';
-import { describeError } from './error-detail.js';
+import { describeError, stackOf } from './error-detail.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
@@ -24,8 +24,8 @@ initLogger(logPath);
 // `describeError` AVANT la stack — une erreur socket a un `code` (ECONNRESET…) mais souvent un
 // `message` VIDE, et `.stack` seule affiche alors « Error\n at … » sans le moindre indice
 // (exactement l'aveuglement de 5 h du 01/08). Le code d'abord, la stack ensuite pour la localisation.
-process.on('uncaughtException', (e) => log('uncaughtException: ' + describeError(e) + ' | ' + (e?.stack || '')));
-process.on('unhandledRejection', (e) => log('unhandledRejection: ' + describeError(e) + ' | ' + (e?.stack || '')));
+process.on('uncaughtException', (e) => log('uncaughtException: ' + describeError(e) + ' | ' + stackOf(e)));
+process.on('unhandledRejection', (e) => log('unhandledRejection: ' + describeError(e) + ' | ' + stackOf(e)));
 
 const manager = new Manager(configPath);
 const router = new Router(manager, process.stdout, pkg.version);

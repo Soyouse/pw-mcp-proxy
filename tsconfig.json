@@ -1,0 +1,13 @@
+{
+  "_comment": "VERIFICATION SEULE — zero .ts, zero build, zero emit. TypeScript est une devDependency qui LIT le JSDoc ; l'invariant zero-dependance RUNTIME reste intact. NE PAS convertir le projet en TypeScript pour faire passer le gate : ce serait echanger un invariant du depot contre du confort. On resserre les types en JSDoc, jamais avec `any` ni @ts-ignore.",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "es2022",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}

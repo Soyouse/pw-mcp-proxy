@@ -19,7 +19,7 @@
 
 import http from 'node:http';
 import { isPidAlive } from './prockill.js';
-import { READY_POLL_MS, PROBE_TIMEOUT_MS } from './budget.js';
+import { READY_POLL_MS, PROBE_TIMEOUT_MS, READY_TIMEOUT_MS } from './budget.js';
 
 /**
  * Le serveur répond-il MAINTENANT sur `/mcp` ? Une seule tentative, sans interprétation.
@@ -47,10 +47,10 @@ export function sonder(port, host = 'localhost', budgetMs = PROBE_TIMEOUT_MS) {
  * Attend qu'un serveur devienne joignable.
  *
  * @param {number} port
- * @param {{budgetMs:number, pid?:number|null, host?:string, delai?:(ms:number)=>Promise<void>}} opts
+ * @param {{budgetMs?:number, pid?:number|null, host?:string, delai?:(ms:number)=>Promise<void>}} [opts]
  * @returns {Promise<'pret'|'mort'|'muet'>}
  */
-export async function attendreReady(port, { budgetMs, pid = null, host = 'localhost', delai } = {}) {
+export async function attendreReady(port, { budgetMs = READY_TIMEOUT_MS, pid = null, host = 'localhost', delai } = {}) {
   const pause = delai || ((ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); }));
   const t0 = Date.now();
   while (Date.now() - t0 < budgetMs) {
