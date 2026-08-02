@@ -300,7 +300,12 @@ export class Supervisor {
         return 'unknown';
       }
       if (!safeToKill(identity, now)) {
-        log(`[supervisor] ${what}: pid=${pid} NON tue — PID RECYCLE (ce process n'est pas le notre)`);
+        // ⚠️ Les DEUX valeurs sont imprimees : sans elles, « PID recycle » et « lecture instable »
+        // sont indiscernables — et on repart sur des hypotheses (2 fausses le 02/08 sur macOS).
+        log(
+          `[supervisor] ${what}: pid=${pid} NON tue — identite differente. ` +
+            `attendue=${JSON.stringify(identity)} lue=${JSON.stringify(now)}`
+        );
         return 'not-ours';
       }
     } else {

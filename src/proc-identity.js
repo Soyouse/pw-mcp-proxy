@@ -28,7 +28,17 @@ function runSync(cmd, args) {
       windowsHide: true,
       maxBuffer: 1024 * 1024,
     });
-    return out.status === 0 ? out.stdout : null;
+    if (out.status === 0) return out.stdout;
+    // ⚠️ DIAGNOSTIC OBLIGATOIRE : sans lui, un echec de lecture est indiscernable d'un PID recycle,
+    // et le reap cesse de nettoyer SANS QUE PERSONNE NE SACHE POURQUOI (macOS, CI du 2026-08-02 :
+    // deux hypotheses successives fausses faute de cette ligne). Meme lecon que le `err.code`
+    // non journalise du 01/08 — on ne diagnostique pas ce qu'on n'imprime pas.
+    log(
+      `proc-identity: ${cmd} status=${out.status} signal=${out.signal || '-'} ` +
+        `stdout=${JSON.stringify((out.stdout || '').slice(0, 120))} ` +
+        `stderr=${JSON.stringify((out.stderr || '').slice(0, 200))}`
+    );
+    return null;
   } catch (e) {
     log(`proc-identity: ${cmd} — ${describeError(e)}`);
     return null;
