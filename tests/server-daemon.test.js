@@ -144,6 +144,58 @@ test('un client TUÉ BRUTALEMENT est décompté quand même (le noyau ferme la s
   expect(d._tues, 'le noyau a fermé la socket => refcount à 0 => serveur arrêté').toEqual([pid]);
 });
 
+// ⚠️ NON-RÉGRESSION — défaut trouvé en LIVE le 02/08 : le serveur mourait (kill externe, crash) et
+// le daemon continuait à servir son URL MORTE à tout nouvel agent, indéfiniment. Le noyau nous le
+// dit pourtant : nous sommes le PARENT, son `exit` est un FAIT. On OUBLIE l'entrée — sans respawn
+// spontané (ce serait une boucle de relance que plus aucun client ne justifie).
+test('serveur MORT sans que personne ne parte => entrée retirée, le suivant repart sur un serveur NEUF', async () => {
+  const enfants = [];
+  let pidSeq = 8000;
+  const d = faux({
+    spawnFn: () => {
+      const handlers = {};
+      const c = { pid: ++pidSeq, on(ev, fn) { handlers[ev] = fn; }, mourir: () => handlers.exit?.(1, null) };
+      enfants.push(c);
+      return c;
+    },
+    // ⚠️ Port DISTINCT à chaque spawn : sinon l'URL du serveur neuf serait identique à celle du
+    // cadavre et le test ne pourrait plus les distinguer (il passerait pour de mauvaises raisons).
+    allouerPort: async () => 20000 + pidSeq,
+  });
+  await d.demarrer();
+  const a = await client(d.nomCanal, 'vegeta');
+  const pidMort = d.etat()[0].pid;
+
+  enfants[0].mourir(); // crash / kill externe : AUCUNE socket ne s'est fermée
+  expect(d.etat(), 'le profil n est plus servi : son URL ne vaut plus rien').toEqual([]);
+
+  const b = await client(d.nomCanal, 'vegeta');
+  expect(b.rep.ok).toBe(true);
+  expect(b.rep.url, 'un serveur NEUF, jamais l URL du cadavre').not.toBe(a.rep.url);
+  expect(d.etat()[0].pid).not.toBe(pidMort);
+});
+
+// ⚠️ Événement PÉRIMÉ : l'`exit` du serveur REMPLACÉ ne doit pas emporter le nouveau.
+test('exit d un serveur DÉJÀ remplacé : le serveur courant est INTACT', async () => {
+  const enfants = [];
+  let pidSeq = 9000;
+  const d = faux({
+    spawnFn: () => {
+      const handlers = {};
+      const c = { pid: ++pidSeq, on(ev, fn) { handlers[ev] = fn; }, mourir: () => handlers.exit?.(1, null) };
+      enfants.push(c);
+      return c;
+    },
+  });
+  await d.demarrer();
+  await client(d.nomCanal, 'vegeta');
+  enfants[0].mourir();
+  await client(d.nomCanal, 'vegeta'); // remplacant
+  const courant = d.etat()[0].pid;
+  enfants[0].mourir(); // l ancien re-emet : doit etre IGNORE
+  expect(d.etat()[0]?.pid, 'le remplacant survit a l evenement perime').toBe(courant);
+});
+
 test('EADDRINUSE : un SECOND daemon refuse de démarrer (fait exact du noyau)', async () => {
   const e = env();
   const d1 = new ServerDaemon({ env: e, spawnFn: () => ({ pid: 1, on() {} }), tuer() {}, allouerPort: async () => 1, attendre: async () => 'pret' });

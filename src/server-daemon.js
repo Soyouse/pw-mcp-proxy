@@ -160,6 +160,17 @@ export class ServerDaemon {
     }
     const etat = { port, pid, url: `http://${URL_HOST}:${port}/mcp`, clients: new Set() };
     this._profils.set(profil, etat);
+    // 🛑 LE SERVEUR PEUT MOURIR SANS QUE PERSONNE NE PARTE (crash, kill externe, OOM). Son `exit`
+    // est un FAIT du noyau, delivre a NOUS parce que nous sommes son PARENT — le seul signal qui
+    // dise « cette URL ne vaut plus rien ». Sans ce retrait, le daemon servirait indefiniment une
+    // URL morte a chaque nouvel agent (mesure LIVE 02/08 : la reprise apres kill echouait).
+    // ⚠️ On ne tue RIEN et on ne respawn RIEN ici : on OUBLIE. Le prochain `acquerir` redemarre
+    // proprement — un respawn spontane serait une boucle de relance sans client pour la justifier.
+    child.on('exit', (code, sig) => {
+      if (this._profils.get(profil) !== etat) return; // deja remplace : evenement PERIME
+      this._profils.delete(profil);
+      log(`[daemon:${profil}] serveur MORT (pid=${pid} code=${code} sig=${sig}) — entree retiree`);
+    });
     log(`[daemon:${profil}] serveur prêt pid=${pid} ${etat.url}`);
     return etat;
   }

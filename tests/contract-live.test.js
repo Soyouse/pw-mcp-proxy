@@ -198,7 +198,13 @@ test.skipIf(!LIVE)('LIVE : serveur partage TUE sous un Manager REEL => echec RAP
     const b1 = await mgr.get('anon2');
     const r1 = await b1.request('tools/call', { name: 'browser_navigate', arguments: { url: 'data:text/html,<title>sain</title>' } });
     expect(r1?.isError, 'etat sain de reference (navigate OK)').not.toBe(true);
-    const pid1 = serverEntry(mgr.supervisor._read(), 'anon2').pid;
+    // ⚠️ Le pid du serveur partage se trouve par son `--port` (le port que CE backend utilise
+    // vraiment), JAMAIS par un registre : depuis le daemon, l'etat n'est plus persiste — et cette
+    // facon de faire est de toute facon plus vraie, elle observe le PROCESS au lieu d'un fichier.
+    const port1 = new URL(b1.transport.url).port;
+    const cible = listProcesses().find((p) => p.cmd.includes(`--port ${port1}`));
+    expect(cible, `aucun process ne sert le port ${port1}`).toBeTruthy();
+    const pid1 = cible.pid;
 
     // Le serveur partage meurt sous nos pieds (reap/restart d'un autre agent, crash...).
     treeKill(pid1);
@@ -219,8 +225,10 @@ test.skipIf(!LIVE)('LIVE : serveur partage TUE sous un Manager REEL => echec RAP
     // session neuve, l'action REUSSIT sans aucune intervention.
     const b2 = await mgr.get('anon2');
     expect(b2, 'backend FRAIS (jamais le cadavre ranime)').not.toBe(b1);
-    const pid2 = serverEntry(mgr.supervisor._read(), 'anon2').pid;
-    expect(pid2, 'nouveau serveur respawne par le self-heal').not.toBe(pid1);
+    const port2 = new URL(b2.transport.url).port;
+    expect(port2, 'serveur NEUF : jamais le port du cadavre').not.toBe(port1);
+    const pid2 = listProcesses().find((p) => p.cmd.includes(`--port ${port2}`))?.pid;
+    expect(pid2, 'nouveau serveur respawne par le daemon').not.toBe(pid1);
     const r2 = await b2.request('tools/call', { name: 'browser_navigate', arguments: { url: 'data:text/html,<title>reprise</title>' } });
     expect(r2?.isError, 'action apres reprise : SUCCES transparent').not.toBe(true);
 
@@ -228,10 +236,8 @@ test.skipIf(!LIVE)('LIVE : serveur partage TUE sous un Manager REEL => echec RAP
   } finally {
     mgr.stopAll();
     try { await mgr.stopSupervision(); } catch {}
-    try {
-      const reg = JSON.parse(fs.readFileSync(mgr.supervisor.registryPath, 'utf8'));
-      for (const s of Object.values(reg.servers || {})) { try { treeKill(s.pid); } catch {} }
-    } catch {}
+    // ⚠️ Le daemon s'arrête SEUL quand son dernier client part (`mgr.stopAll()` ferme la socket) :
+    // il n'y a plus de registre à balayer. Le harnais reste le filet de dernier recours.
     try { fs.unwatchFile(mgrCfg); } catch {}
     try { fs.unlinkSync(mgrCfg); } catch {}
   }

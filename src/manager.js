@@ -12,11 +12,13 @@ import { HttpTransport } from './http-transport.js';
 import { Supervisor } from './supervisor.js';
 import { log } from './logger.js';
 import { alert } from './notify.js';
-import { sweepByCmd, listProcesses, isPidAlive } from './prockill.js';
+import { sweepByCmd, listProcesses } from './prockill.js';
 import { buildSpec } from './spec.js';
 import { shouldAutoRestart, DEFAULT_MAX_RESTARTS, DEFAULT_WINDOW_MS } from './auto-restart.js';
 import { formatFreezeReport } from './freeze-report.js';
-import { serverEntry } from './server-registry.js';
+// ⚠️ Le DAEMON remplace le superviseur : le ref-count est tenu par le NOYAU (socket ouverte),
+// plus par un registre fichier + heartbeat + TTL. Cf src/server-daemon.js pour le POURQUOI.
+import { acquerirProfil } from './daemon-client.js';
 // ⚠️ SOURCE UNIQUE des delais (budget.js) — NE JAMAIS redeclarer une duree ici.
 import { CONFIG_WATCH_INTERVAL_MS } from './budget.js';
 // ⚠️ describeError : JAMAIS `e.message` seul (il peut etre VIDE — incident 01/08).
@@ -48,6 +50,10 @@ export class Manager {
       windowMs: options.autoRestart?.windowMs ?? DEFAULT_WINDOW_MS,
     };
     this._restartHistory = new Map(); // profile -> number[] timestamps des auto-restarts declenches (anti-boucle)
+    // 🛑 profile -> socket vers le DAEMON. CETTE SOCKET **EST** LE REF-COUNT : tant qu'elle vit, le
+    // daemon sait que CE proxy utilise ce profil. La fermer = « je n'en ai plus besoin » (evenement
+    // du NOYAU, delivre meme sur kill -9). NE JAMAIS la fermer apres avoir lu l'URL.
+    this._connexions = new Map();
     this._loadConfig();
     this._watch();
   }
@@ -99,7 +105,7 @@ export class Manager {
       if (!this.config.profiles[name]) {
         b.stop();
         this.backends.delete(name);
-        this.supervisor?.unregisterClient(name); // http : je ne suis plus client de ce profil (ref-count)
+        this._closeConnexion(name); // http : je ne suis plus client de ce profil (ref-count noyau)
         continue;
       }
       const newSpec = this._spec(name);
@@ -210,13 +216,10 @@ export class Manager {
     try {
       const cfg = this.config.profiles?.[profile] || {};
       const udd = cfg.userDataDir || null;
+      // ⚠️ Le pid/port du serveur partage n'est PLUS lisible ici : il vit dans le daemon, qui est le
+      // seul a le connaitre (fin du registre fichier). Le DISCRIMINANT du rapport reste intact —
+      // c'est `browserCount` (0 = Chrome mort, >0 = fige), jamais le pid du serveur.
       let serverPid = null, serverAlive = null, port = null, browserCount = null;
-      if (this._isHttp(profile)) {
-        try {
-          const entry = serverEntry(this._sup()._read(), profile);
-          if (entry) { serverPid = entry.pid; port = entry.port; serverAlive = isPidAlive(entry.pid); }
-        } catch {}
-      }
       if (udd) {
         try {
           // Discriminant Chrome mort/fige. Normalise les slashes (Windows \ vs Unix /) pour ne pas
@@ -242,10 +245,22 @@ export class Manager {
   async _makeTransport(profile) {
     const spec = this._spec(profile);
     if (!this._isHttp(profile)) return new StdioTransport(profile, spec);
-    const cfg = this.config.profiles[profile] || {};
-    const url = await this._sup().ensureServer(profile, spec, { userDataDir: cfg.userDataDir });
-    this._sup().registerClient(profile);
+    // ⚠️ Le daemon GARANTIT le serveur (le demarre si besoin, le partage sinon) et rend une socket.
+    // Cette socket EST le ref-count : on la GARDE ouverte, `_release` la fermera. La fermer ici
+    // libererait le profil aussitot et tuerait le navigateur sous l'agent.
+    const { url, connexion } = await acquerirProfil(profile, spec, {});
+    this._closeConnexion(profile); // une SEULE connexion par profil (re-acquisition apres purge)
+    this._connexions.set(profile, connexion);
     return new HttpTransport(url, { protocolVersion: this.clientInfo.protocolVersion, spec });
+  }
+
+  // Ferme MA connexion au daemon pour ce profil = decremente le ref-count. Best-effort et
+  // idempotent : liberer ne doit JAMAIS faire echouer une bascule reussie.
+  _closeConnexion(profile) {
+    const c = this._connexions.get(profile);
+    if (!c) return;
+    this._connexions.delete(profile);
+    try { c.destroy(); } catch (e) { log(`[daemon:${profile}] fermeture: ${describeError(e)}`); }
   }
 
   // SEUL chemin de bascule de profil (router._handleSwitch l'appelle ; NE PAS re-ecrire
@@ -279,10 +294,8 @@ export class Manager {
       this.backends.delete(profile); // AVANT stop() : 'close' -> _onBackendUnresponsive ne doit rien retrouver
       try { b.stop(); } catch (e) { log(`[backend:${profile}] liberation: ${describeError(e)}`); }
     }
-    // http seulement : decremente le ref-count du serveur partage (no-op en stdio).
-    if (this._isHttp(profile)) {
-      try { this.supervisor?.unregisterClient(profile); } catch (e) { log(`[supervisor:${profile}] unregister: ${describeError(e)}`); }
-    }
+    // http seulement : fermer ma socket decremente le ref-count tenu par le NOYAU (no-op en stdio).
+    this._closeConnexion(profile);
   }
 
   active() {
@@ -327,6 +340,9 @@ export class Manager {
   stopAll() {
     for (const b of this.backends.values()) b.stop();
     this.backends.clear();
+    // Rendre TOUS mes profils au daemon. La correction n'en depend pas (le noyau ferme les sockets
+    // a la mort du process, meme sur kill -9) — c'est la sortie PROPRE, pas le filet.
+    for (const p of [...this._connexions.keys()]) this._closeConnexion(p);
   }
 
   // Au moins un profil en mode HTTP (=> supervision de serveurs partages requise) ?
