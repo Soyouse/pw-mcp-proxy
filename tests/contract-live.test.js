@@ -236,3 +236,90 @@ test.skipIf(!LIVE)('LIVE : serveur partage TUE sous un Manager REEL => echec RAP
     try { fs.unlinkSync(mgrCfg); } catch {}
   }
 });
+
+// ═══ S8 — ETANCHEITE DES IDENTITES (scenario du skill §COMPORTEMENT ATTENDU) ══════════════════
+// ⚠️ C'EST LA RAISON D'ETRE DU PROJET, et RIEN ne la verifiait jusqu'au 02/08/2026 : « 1 profil =
+// 1 compte Google ». Si les cookies fuient d'un profil a l'autre, l'agent agit sur le MAUVAIS
+// compte — et ca casserait EN SILENCE (aucune erreur, juste la mauvaise identite).
+// On ne teste pas la presence du flag --user-data-dir (ca, spec.js le fait) : on teste le FAIT,
+// avec deux VRAIS navigateurs et un vrai cookie.
+test.skipIf(!LIVE)('LIVE S8 : un cookie pose dans le profil A est INVISIBLE depuis le profil B', async () => {
+  const http = await import('node:http');
+  // Un cookie exige une vraie origine (data: ne compte pas) => mini-site local.
+  const site = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<html><body>ok</body></html>');
+  });
+  site.on('connection', (s) => s.on('error', () => {}));
+  await new Promise((r) => site.listen(0, '127.0.0.1', r));
+  const origin = `http://localhost:${site.address().port}/`;
+
+  const dirs = [];
+  const backends = [];
+  const mkProfil = async (nom) => {
+    const udd = path.join(os.tmpdir(), `pw-mcp-s8-${process.pid}-${nom}`);
+    dirs.push(udd);
+    const spec = buildSpec(nom, {
+      userDataDir: udd,
+      args: ['--headless'],
+      backend: { command: 'npx', args: ['-y', `@playwright/mcp@${VERSION}`] },
+    }, {}, { http: true }); // http => --shared-browser-context (multi-agent), comme en prod
+    const url = await sup.ensureServer(nom, spec, { userDataDir: udd });
+    const b = new Backend(nom, new HttpTransport(url, { protocolVersion: CLIENT.protocolVersion, spec }));
+    await b.start(CLIENT);
+    backends.push(b);
+    return b;
+  };
+  const call = (b, name, args) => b.request('tools/call', { name, arguments: args });
+
+  try {
+    // --- profil A : on pose un cookie sur l'origine
+    const A = await mkProfil(`s8a${process.pid}`);
+    await call(A, 'browser_navigate', { url: origin });
+    await call(A, 'browser_evaluate', { function: '() => { document.cookie = "identite=profilA; path=/"; return document.cookie; }' });
+    const relu = await call(A, 'browser_evaluate', { function: '() => document.cookie' });
+    expect(JSON.stringify(relu), 'prealable : le cookie EST bien pose dans A').toMatch(/profilA/);
+
+    // --- profil B : meme origine, navigateur et user-data-dir DIFFERENTS
+    const B = await mkProfil(`s8b${process.pid}`);
+    await call(B, 'browser_navigate', { url: origin });
+    const vuParB = await call(B, 'browser_evaluate', { function: '() => document.cookie' });
+
+    expect(
+      JSON.stringify(vuParB),
+      'ETANCHEITE VIOLEE : le cookie du profil A est visible depuis le profil B — un agent agirait sur le MAUVAIS compte'
+    ).not.toMatch(/profilA/);
+  } finally {
+    for (const b of backends) { try { b.stop(); } catch {} }
+    await new Promise((r) => site.close(r));
+    for (const d of dirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
+  }
+}, 240000);
+
+// ═══ S3 — N AGENTS A TOUR DE ROLE (scenario du skill) ═════════════════════════════════════════
+// Le mode COOPERATIF est le mode VOULU : plusieurs agents partagent 1 navigateur et agissent
+// chacun leur tour. Teste ce que l'utilisateur constate reellement — pas seulement que les deux
+// backends « existent » (ca, le test d'adoption le fait deja) : que les DEUX AGISSENT avec succes.
+test.skipIf(!LIVE)('LIVE S3 : deux agents agissent A TOUR DE ROLE sur le meme navigateur partage', async () => {
+  const spec = buildSpec('anon', { isolated: true, args: ['--headless'], backend: { command: 'npx', args: ['-y', `@playwright/mcp@${VERSION}`] } }, {});
+  const url = await sup.ensureServer('anon', spec);
+
+  const a = new Backend('anon', new HttpTransport(url, { protocolVersion: CLIENT.protocolVersion, spec }));
+  const b = new Backend('anon', new HttpTransport(url, { protocolVersion: CLIENT.protocolVersion, spec }));
+  await a.start(CLIENT);
+  await b.start(CLIENT);
+
+  try {
+    const call = (x, name, args) => x.request('tools/call', { name, arguments: args });
+    // Chacun son tour, jamais en meme temps (la regle de cooperation documentee).
+    const r1 = await call(a, 'browser_navigate', { url: 'about:blank' });
+    expect(r1?.isError, 'agent A agit sans erreur').toBeFalsy();
+    const r2 = await call(b, 'browser_snapshot', {});
+    expect(r2?.isError, 'agent B agit ENSUITE sans erreur, sur le meme navigateur').toBeFalsy();
+    const r3 = await call(a, 'browser_snapshot', {});
+    expect(r3?.isError, 'agent A reprend la main apres B').toBeFalsy();
+  } finally {
+    try { a.stop(); } catch {}
+    try { b.stop(); } catch {}
+  }
+}, 180000);
