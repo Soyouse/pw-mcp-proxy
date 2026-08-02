@@ -105,6 +105,15 @@ export class Manager {
         const wasActive = name === this.activeProfile;
         b.stop();
         this.backends.delete(name);
+        // 🛑 RELACHER AVANT DE REPRENDRE — l'inverse EXACT de `setActiveProfile`, et c'est voulu.
+        // Ici l'intention est de REDEMARRER le serveur avec la nouvelle spec : garder l'ancienne
+        // connexion le maintiendrait vivant, et le daemon nous rendrait le MEME serveur, avec les
+        // ANCIENS args. Bug REEL trouve le 02/08 par la matrice de transports : en stdio le child
+        // prive respawnait (donc vert), en HTTP le changement de `caps` n'avait JAMAIS lieu.
+        // ⚠️ MULTI-AGENT : si un AUTRE agent tient encore ce profil, son serveur SURVIT (refcount)
+        // et la nouvelle spec ne s'appliquera qu'a son depart. C'est la bonne semantique — on ne
+        // coupe pas le navigateur d'autrui pour un changement de config qui nous concerne.
+        this._closeConnexion(name);
         if (wasActive) {
           try {
             await this.get(name); // respawn immediat avec la nouvelle spec

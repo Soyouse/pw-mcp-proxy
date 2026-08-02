@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 // Faux serveur MCP pour les tests d'integration du proxy (zero dependance).
-// Parle le protocole MCP sur stdio ndjson. `--tag X` distingue deux backends.
+//
+// 🛑 DEUX TRANSPORTS, UN SEUL COMPORTEMENT. `--port` present => Streamable HTTP (le mode de la
+// PROD) ; sinon stdio ndjson. Le `handle()` plus bas est PARTAGE mot pour mot par les deux : c'est
+// ce qui permet de faire tourner LA MEME suite d'integration sur les deux transports sans en
+// dupliquer une seule assertion. Un comportement duplique divergerait, et la matrice ne prouverait
+// plus rien. ⚠️ NE JAMAIS forker ce fichier en deux fixtures.
+// `--tag X` distingue deux backends.
 // Tools exposes : echo_<tag>, notify_<tag> (emet une notif), ask_<tag> (requete server->client).
 
 import process from 'node:process';
@@ -14,8 +20,82 @@ const CAPS = capsArg ? capsArg.slice('--caps='.length).split(',') : [];
 // (ici switch_profile) -> exerce la garde anti-collision du router.
 const COLLIDE = process.argv.includes('--collide');
 
+// --host/--port sont ajoutes par le DAEMON en mode HTTP (comme au vrai @playwright/mcp).
+const iPort = process.argv.indexOf('--port');
+const PORT = iPort !== -1 ? Number(process.argv[iPort + 1]) : null;
+const iHost = process.argv.indexOf('--host');
+const HOST = iHost !== -1 ? process.argv[iHost + 1] : 'localhost';
+
+// ---------------------------------------------------------------------------
+// MODE HTTP (prod) — n'existe que si --port est passe.
+// ---------------------------------------------------------------------------
+if (PORT) {
+  const http = await import('node:http');
+  /** id de requete client -> reponse HTTP en attente (le POST reste OUVERT tant qu'on n'a pas repondu) */
+  const enAttente = new Map();
+  let fluxGet = null; // flux SSE serveur->client (ouvert par le proxy)
+  let sessions = 0;
+
+  // ⚠️ `send` a la MEME signature qu'en stdio : c'est ce qui rend `handle()` reutilisable tel quel.
+  send = (msg) => {
+    const estReponse = msg.id !== undefined && msg.method === undefined;
+    if (estReponse) {
+      const res = enAttente.get(msg.id);
+      if (res) {
+        enAttente.delete(msg.id);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(msg));
+        return;
+      }
+    }
+    // Notification, OU requete serveur->client (ask_) : par le flux GET, seule voie descendante.
+    if (fluxGet) fluxGet.write(`data: ${JSON.stringify(msg)}
+
+`);
+  };
+
+  const serveur = http.createServer((req, res) => {
+    // ⚠️ Handlers d'erreur socket OBLIGATOIRES (cf doc tests) : un RST apres reponse complete
+    // remonte sur la SOCKET, pas sur req/res => uncaughtException => fixture morte en silence.
+    req.on('error', () => {});
+    res.on('error', () => {});
+
+    if (req.method === 'DELETE') { res.writeHead(200); res.end(); return; }
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      // 🛑 FLUSH IMMEDIAT DES EN-TETES — sans ca, Node les GARDE tant que rien n'est ecrit, et un
+      // flux SSE peut rester muet longtemps. La sonde de readiness (GET /mcp) n'obtenait alors
+      // JAMAIS de reponse : port OUVERT mais serveur declare « VIVANT mais silencieux » au bout de
+      // 20 s. Mesure du 02/08 — c'est ce qui a fait echouer toute la passe HTTP de la matrice.
+      res.flushHeaders();
+      fluxGet = res;
+      req.on('close', () => { if (fluxGet === res) fluxGet = null; });
+      return;
+    }
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      let msg;
+      try { msg = JSON.parse(body); } catch { res.writeHead(400); res.end(); return; }
+      const estRequete = msg.id !== undefined && msg.method !== undefined;
+      if (!estRequete) { res.writeHead(202); res.end(); handle(msg); return; } // notif / reponse du client
+      if (msg.method === 'initialize') {
+        // Session-Id : le proxy DOIT le renvoyer ensuite (spec Streamable HTTP).
+        enAttente.set(msg.id, Object.assign(res, { _sid: true }));
+        res.setHeader('mcp-session-id', 'sess-' + ++sessions);
+      } else {
+        enAttente.set(msg.id, res);
+      }
+      handle(msg);
+    });
+  });
+  serveur.on('clientError', (e, sock) => sock.destroy());
+  serveur.on('connection', (sock) => sock.on('error', () => {}));
+  serveur.listen(PORT, HOST);
+}
+
 let buf = '';
-process.stdin.setEncoding('utf8');
+if (!PORT) process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
   buf += chunk;
   let i;
