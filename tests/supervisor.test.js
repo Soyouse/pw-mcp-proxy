@@ -45,6 +45,17 @@ function readReg(s) {
 let profSeq = 0;
 const prof = () => `sup${process.pid}-${++profSeq}`;
 
+// ⚠️ HORLOGE DE TEST CONTROLEE. `os.uptime()` a une resolution d'UNE SECONDE sur macOS (mesure CI
+// 2026-08-02) : avec un `ttl` de quelques ms, `now - lastSeen` y restait a 0 et le reap ne
+// declenchait JAMAIS — 2 tests rouges sur macOS seulement. Un test ne doit pas dependre de la
+// resolution de l'horloge de l'OS : on avance le temps EXPLICITEMENT.
+function fakeClock(start = 1_000_000) {
+  let t = start;
+  const now = () => t;
+  now.advance = (ms) => { t += ms; };
+  return now;
+}
+
 beforeAll(() => { cfgPath = path.join(os.tmpdir(), `pw-mcp-sup-${process.pid}.json`); });
 beforeEach(() => {
   // registre/verrou propres a chaque test (isolation)
@@ -124,10 +135,11 @@ test('LANCEUR MORT + 2 proxys concurrents => UN SEUL serveur, sans aucun vol de 
 
 test('reap : serveur SANS client vivant (ttl court) est tue et retire', async () => {
   const P = prof();
-  const sup = newSup({ ttl: 1, clientId: 'solo' }); // ttl=1ms => idle immediat
+  const clock = fakeClock();
+  const sup = newSup({ ttl: 1, clientId: 'solo', clock }); // ttl=1ms => idle des qu'on avance
   await sup.ensureServer(P, SPEC);
   const entry = serverEntry(readReg(sup), P);
-  await new Promise((r) => setTimeout(r, 20)); // depasse le ttl
+  clock.advance(60_000); // depasse le ttl SANS dependre de la resolution de l'OS
   await sup.reap();
   expect(serverEntry(readReg(sup), P), 'retire du registre').toBe(null);
   expect(await waitFor(async () => !isPidAlive(entry.pid)), 'process tue (tree-kill)').toBeTruthy();
@@ -141,7 +153,8 @@ test('PID RECYCLE : le reap REFUSE de tuer un process qui n est plus le notre', 
   // On reproduit exactement ca : un pid VIVANT dont l'identite enregistree ne correspond plus
   // (c'est la signature d'un recyclage). Le reap DOIT s'abstenir.
   const P = prof();
-  const sup = newSup({ ttl: 1, clientId: 'recycle' }); // ttl=1ms => le reap voudra le tuer
+  const clock = fakeClock();
+  const sup = newSup({ ttl: 1, clientId: 'recycle', clock }); // ttl court => le reap voudra le tuer
   await sup.ensureServer(P, SPEC);
   const entry = serverEntry(readReg(sup), P);
   expect(isPidAlive(entry.pid), 'serveur bien demarre').toBe(true);
@@ -151,7 +164,7 @@ test('PID RECYCLE : le reap REFUSE de tuer un process qui n est plus le notre', 
   reg.servers[P].identity = 'identite-d-un-process-disparu';
   fs.writeFileSync(sup.registryPath, JSON.stringify(reg));
 
-  await new Promise((r) => setTimeout(r, 20)); // depasse le ttl : le reap le considere idle
+  clock.advance(60_000); // depasse le ttl : le reap le considere idle
   await sup.reap();
 
   expect(isPidAlive(entry.pid), 'process EPARGNE : absence de preuve = pas de kill').toBe(true);
@@ -166,7 +179,8 @@ test('IDENTITE ILLISIBLE : ni tue, ni OUBLIE (pas d orphelin invisible)', async 
   //
   // Le doute doit se REPORTER, jamais se resoudre par un effacement.
   const P = prof();
-  const sup = newSup({ ttl: 1, clientId: 'illisible' });
+  const clock = fakeClock();
+  const sup = newSup({ ttl: 1, clientId: 'illisible', clock });
   await sup.ensureServer(P, SPEC);
   const entry = serverEntry(readReg(sup), P);
 
@@ -174,7 +188,7 @@ test('IDENTITE ILLISIBLE : ni tue, ni OUBLIE (pas d orphelin invisible)', async 
   const vraie = sup._killIfOurs.bind(sup);
   sup._killIfOurs = () => 'unknown';
 
-  await new Promise((r) => setTimeout(r, 20));
+  clock.advance(60_000);
   await sup.reap();
 
   expect(serverEntry(readReg(sup), P), 'entree CONSERVEE : on ne perd jamais un process de vue').toBeTruthy();

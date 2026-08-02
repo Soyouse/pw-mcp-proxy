@@ -90,7 +90,12 @@ export class Supervisor {
   // ⚠️ `readyTimeoutMs` est INJECTABLE (defaut = budget.js) pour que les tests bornent leur pire cas
   // (SPAWN_ATTEMPTS x patience) sous la limite d'un test. La PROD garde le defaut : 20 s sont
   // necessaires a un boot legitime (premier `npx` qui telecharge le paquet). NE PAS raccourcir en prod.
-  constructor(configPath, { ttl = SERVER_TTL_MS, clientId = String(process.pid), ntfyUrl = null, allocatePort = allocateEphemeralPort, readyTimeoutMs = READY_TIMEOUT_MS } = {}) {
+  constructor(configPath, { ttl = SERVER_TTL_MS, clientId = String(process.pid), ntfyUrl = null, allocatePort = allocateEphemeralPort, readyTimeoutMs = READY_TIMEOUT_MS, clock = monotonicNow } = {}) {
+    // ⚠️ `clock` INJECTABLE pour la meme raison que `allocatePort` : rendre les tests
+    // DETERMINISTES. `os.uptime()` a une resolution d'UNE SECONDE sur macOS (mesure CI
+    // 2026-08-02) — un test a TTL de quelques ms n'y declencherait JAMAIS le reap, et le
+    // resultat dependrait de l'OS. La PROD garde le defaut : jamais d'override hors tests.
+    this._now = clock;
     this._allocatePort = allocatePort;
     this.readyTimeoutMs = readyTimeoutMs;
     // Patience des REESSAIS : courte (paquet deja en cache), et JAMAIS superieure a la nominale —
@@ -125,7 +130,7 @@ export class Supervisor {
     for (const e of Object.values(reg.servers || {})) {
       if (e && typeof e === 'object') stamps.push(e.startedAt, e.spawnedAt, ...Object.values(e.clients || {}));
     }
-    const now = monotonicNow();
+    const now = this._now();
     // LEGACY (horodatages en heure murale) : les process peuvent etre VIVANTS. On CONVERTIT — les
     // oublier laisserait des serveurs orphelins A VIE le jour de la mise a jour, en silence.
     // Ils repartent avec une grace d'un TTL : au pire un serveur idle vit un cycle de plus.
@@ -412,8 +417,8 @@ export class Supervisor {
       // 'ready'. ⚠️ NE PAS la re-creer ici avec withServer : ce serait un SECOND site de construction
       // d'entree (deux verites a maintenir en parallele = la duplication qui derive), et ca ecraserait
       // le spawnedAt d'origine — donc le seul horodatage qui date reellement le demarrage.
-      let out = promoteServer(this._read(), profile, monotonicNow());
-      out = withClient(out, profile, this.clientId, monotonicNow()); // je m'enregistre immediatement
+      let out = promoteServer(this._read(), profile, this._now());
+      out = withClient(out, profile, this.clientId, this._now()); // je m'enregistre immediatement
       this._write(out);
       // ⚠️ PUBLICATION APRES readiness PROUVEE, jamais avant : un suiveur qui recoit un port le
       // considere JOIGNABLE par construction. Publier un port « en cours » rendrait le suiveur
@@ -466,7 +471,7 @@ export class Supervisor {
     // ⚠️ IDENTITE CAPTUREE ICI, au plus pres du spawn : c'est le seul instant ou l'on SAIT que ce pid
     // est bien le notre. Toute lecture ulterieure sera comparee a celle-ci avant un kill.
     const identity = processIdentity(pid);
-    this._write(withServer(this._read(), profile, { port, pid, identity, startedAt: monotonicNow(), state: STATE_STARTING }));
+    this._write(withServer(this._read(), profile, { port, pid, identity, startedAt: this._now(), state: STATE_STARTING }));
     if (await this._pollReady(port, budgetMs)) return pid;
     try { treeKill(pid); } catch {}
     // Tentative RATEE : on retire l'intention qu'on vient d'inscrire. Le pid vient d'etre tue ; laisser
@@ -488,7 +493,7 @@ export class Supervisor {
   async _touch(profile) {
     try {
       await this._withLock(async () => {
-        const reg = withClient(this._read(), profile, this.clientId, monotonicNow());
+        const reg = withClient(this._read(), profile, this.clientId, this._now());
         this._write(reg);
       });
     } catch (e) {
@@ -520,7 +525,7 @@ export class Supervisor {
         const alive = pids.filter((p) => isPidAlive(p));
         // startStaleMs() = budget au-dela duquel une entree 'starting' jamais promue est morte-nee.
         // C'est CE parametre qui rend l'orphelin du 31/07 tuable AUTOMATIQUEMENT (0-human).
-        const { reap, kept } = reapDecision(reg, alive, monotonicNow(), this.ttl, startStaleMs());
+        const { reap, kept } = reapDecision(reg, alive, this._now(), this.ttl, startStaleMs());
         const doute = []; // entrees dont l'identite n'a PAS pu etre lue : a CONSERVER
         for (const r of reap) {
           const verdict = this._killIfOurs(r.pid, (reg.servers || {})[r.profile]?.identity, `reap ${r.reason}`);

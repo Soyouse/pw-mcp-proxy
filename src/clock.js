@@ -18,6 +18,14 @@ import os from 'node:os';
 
 /**
  * Millisecondes ecoulees depuis le demarrage de la machine.
+ *
+ * ⚠️ RESOLUTION DEPENDANTE DE L'OS — MESUREE en CI le 2026-08-02 : Linux lit `/proc/uptime`
+ *    (centiemes de seconde), mais **macOS derive de `kern.boottime` et ne bouge que toutes les
+ *    SECONDES**. Deux evenements de la meme seconde y portent donc le MEME horodatage.
+ *    Sans effet en production (les TTL sont de l'ordre de la minute), mais RHEDIBITOIRE pour un
+ *    test qui veut un TTL de quelques ms ⇒ le Supervisor prend une horloge INJECTABLE, et les
+ *    tests fournissent la leur. NE PAS « corriger » en melangeant une horloge fine locale : elle
+ *    ne serait plus comparable entre process, ce qui est toute la raison d'etre de ce module.
  * Monotone (ne recule jamais), commune a tous les process locaux, immunisee NTP/DST.
  * @returns {number} entier
  */
