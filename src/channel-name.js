@@ -143,6 +143,38 @@ export function channelName(profile, env = {}) {
 }
 
 /**
+ * Nom du canal du DAEMON UNIQUE (un seul par utilisateur, tous profils confondus).
+ *
+ * ⚠️ NON-COLLISION PAR CONSTRUCTION, pas par convention. Le nom omet le segment de profil :
+ *   profil  -> `<PREFIX><user>-<profil>`   (channelName, jamais vide : elle throw sur profil vide)
+ *   daemon  -> `<PREFIX><user>`            (ici)
+ * Aucun profil ne peut donc produire le nom du daemon. **NE PAS "simplifier" en reservant un nom
+ * de profil du type `_daemon`** : un utilisateur a le droit d'appeler son profil `_daemon`, et la
+ * collision ferait dialoguer un proxy avec le mauvais interlocuteur — exactement la classe de
+ * faute que le percent-encoding reversible existe pour interdire. Injectivite property-testee.
+ *
+ * Meme regles que channelName pour le reste : segment UTILISATEUR obligatoire (espace de noms des
+ * pipes global a la machine sur Windows) et `$XDG_RUNTIME_DIR` avant `/tmp` sur POSIX
+ * (systemd-tmpfiles purge /tmp a 10 jours ⇒ socket effacee sous un daemon VIVANT ⇒ deux daemons).
+ */
+export function daemonChannelName(env = {}) {
+  const platform = env.platform || process.platform;
+  const who = encodeProfile(userSegment(env.userInfo || null));
+
+  if (platform === 'win32') return `\\\\.\\pipe\\${PREFIX}${who}`;
+
+  const dir = env.tmpdir || runtimeDir(platform);
+  const full = path.join(dir, `${PREFIX}${who}.sock`);
+  if (Buffer.byteLength(full) > SUN_PATH_MAX) {
+    // FAILS-CLOSED, comme channelName : jamais de troncature ni de hash.
+    throw new Error(
+      `daemonChannelName: chemin de socket trop long (${Buffer.byteLength(full)} > ${SUN_PATH_MAX})`
+    );
+  }
+  return full;
+}
+
+/**
  * Le canal est-il un FICHIER susceptible de survivre a un crash ?
  * Vrai sur POSIX (socket de domaine Unix), faux sur Windows (le noyau detruit le pipe).
  * Determine si l'appelant doit gerer le cas « socket orpheline ».
