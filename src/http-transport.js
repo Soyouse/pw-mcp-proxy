@@ -31,9 +31,6 @@ import { describeError } from './error-detail.js';
 
 const SESSION_HEADER = 'mcp-session-id';
 const PROTOCOL_HEADER = 'mcp-protocol-version';
-// Borne d'ESSAIS consecutifs d'ouverture du flux GET (PAS un delai) : au-dela, le serveur est
-// declare perdu au lieu de boucler a l'infini en silence. Remis a zero des qu'un flux s'ouvre.
-const GET_MAX_CONSECUTIVE_FAILURES = 5;
 
 export class HttpTransport extends EventEmitter {
   constructor(url, { protocolVersion = '2025-06-18', spec = null } = {}) {
@@ -161,24 +158,13 @@ export class HttpTransport extends EventEmitter {
 
   async _openGet() {
     // Le serveur peut clore le stream a tout moment (spec) : on re-ouvre tant qu'on est vivant.
-    // ⚠️ Les echecs CONSECUTIFS sont COMPTES et BORNES — NE PAS revenir a un `continue` nu.
-    // Avant (bug trouve 02/08) : serveur mort SANS requete en vol => le watchdog ne pinge pas (il
-    // ne tourne que sur requete en vol) et aucun POST ne part => cette boucle tournait A VIE, a 2 Hz,
-    // SANS UNE SEULE LIGNE DE LOG. La mort du backend n'etait alors decouverte qu'au prochain appel
-    // de l'agent. Au seuil, on declare la perte (_fail) : le Manager reconstruit un backend FRAIS.
-    let consecutiveFailures = 0;
     while (!this._closed) {
       this._getAbort = new AbortController();
       let res;
       try {
         res = await this._req('GET', this._headers({ accept: 'text/event-stream' }), undefined, this._getAbort.signal);
-      } catch (e) {
+      } catch {
         if (this._closed) return;
-        if (++consecutiveFailures >= GET_MAX_CONSECUTIVE_FAILURES) {
-          this._fail(`flux GET SSE inouvrable apres ${consecutiveFailures} tentatives: ` + describeError(e));
-          return;
-        }
-        log(`[http] GET SSE echec ${consecutiveFailures}/${GET_MAX_CONSECUTIVE_FAILURES}: ` + describeError(e));
         await this._delay(500);
         continue;
       }
@@ -187,15 +173,9 @@ export class HttpTransport extends EventEmitter {
       if (res.status < 200 || res.status >= 300 || !(res.headers['content-type'] || '').includes('text/event-stream')) {
         res.stream.resume();
         if (this._closed) return;
-        if (++consecutiveFailures >= GET_MAX_CONSECUTIVE_FAILURES) {
-          this._fail(`flux GET SSE refuse apres ${consecutiveFailures} tentatives (dernier statut HTTP ${res.status})`);
-          return;
-        }
-        log(`[http] GET SSE refuse ${consecutiveFailures}/${GET_MAX_CONSECUTIVE_FAILURES} (HTTP ${res.status})`);
         await this._delay(500);
         continue;
       }
-      consecutiveFailures = 0; // flux OUVERT : la sequence d'echecs est rompue
       await this._consumeSse(res.stream);
       if (this._closed) return;
       await this._delay(300); // stream clos par le serveur : petite pause puis re-ouverture
