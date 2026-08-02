@@ -159,3 +159,28 @@ test('S6 : le DERNIER client parti, le serveur s arrête (zéro process qui tra�
   expect(isPidAlive(pid), 'S6 VIOLÉ : le serveur survit alors que plus AUCUN client ne l utilise — fuite de navigateur').toBe(false);
   expect(await repond(u.hostname, Number(u.port)), 'le port est libéré').toBe(false);
 }, 60000);
+
+// ⚠️ ANTI-RÉGRESSION « la charge n'est pas une panne » (refonte 02/08, objection de Théo).
+// L'ancienne boucle de readiness sondait jusqu'à épuisement d'un chronomètre SANS jamais demander
+// si le process vivait. Conséquences, toutes deux vécues le 02/08 :
+//   - machine chargée (84 serveurs MCP en fond) => `node` lent à démarrer => déclaré CASSÉ ;
+//   - process mort à la seconde => on attendait quand même le budget ENTIER pour rien.
+// Le budget est désormais un FILET (cas indécidable : vivant mais muet), jamais un couperet.
+// Modèle systemd `Type=notify` : le service SIGNALE, `TimeoutStartSec` n'est qu'un dernier recours.
+test('READINESS : un process MORT est constaté IMMÉDIATEMENT, sans consommer le budget', async () => {
+  const sup = newSup({ ttl: 5000 });
+  const t0 = Date.now();
+  // Budget volontairement ÉNORME : si le verdict attendait le chronomètre, ce test durerait 60 s.
+  const verdict = await sup._pollReady(1, 60000, 999999); // pid inexistant => 'mort'
+  const ecoule = Date.now() - t0;
+
+  expect(verdict, 'le noyau SAIT que ce pid n existe pas — c est un FAIT, pas une supposition').toBe('mort');
+  expect(ecoule, `constat immédiat attendu, ${ecoule}ms écoulés sur un budget de 60000`).toBeLessThan(5000);
+}, 90000);
+
+test('READINESS : un process VIVANT mais muet rend « muet » (indécidable), jamais « mort »', async () => {
+  const sup = newSup({ ttl: 5000 });
+  // NOTRE propre process : vivant, et n'écoute certainement pas sur le port 1.
+  const verdict = await sup._pollReady(1, 700, process.pid);
+  expect(verdict, 'vivant sans écouter = le seul cas réellement indécidable').toBe('muet');
+}, 30000);

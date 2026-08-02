@@ -344,13 +344,37 @@ export class Supervisor {
       clearTimeout(t);
     }
   }
-  async _pollReady(port, budget = this.readyTimeoutMs) {
+  /**
+   * Attend qu'un serveur devienne joignable. Rend `'pret'`, `'mort'` ou `'muet'`.
+   *
+   * ⚠️ LE BUDGET EST UN FILET, PAS UN COUPERET — refonte 02/08/2026, et c'est un CHANGEMENT DE
+   * NATURE, pas un reglage. L'ancienne boucle sondait « jusqu'a epuisement du chronometre » sans
+   * jamais demander si le process VIVAIT : sur une machine chargee, un `node` qui met plus que le
+   * budget a demarrer etait declare CASSE. Un logiciel ne doit pas echouer parce que la machine est
+   * occupee — le nombre de process de l'utilisateur ne nous regarde pas.
+   *
+   * Deux des trois issues sont des FAITS EXACTS du noyau, obtenus SANS delai :
+   *   - le port repond            => 'pret' (immediat, quelle que soit la duree ecoulee)
+   *   - le process a disparu      => 'mort' (immediat : inutile d'attendre un mort)
+   * La troisieme seule est indecidable — « vivant mais qui n'ecoutera peut-etre jamais » releve du
+   * probleme de l'arret : AUCUNE observation ne tranche. C'est le seul cas ou le budget sert, et
+   * c'est pour cela qu'il peut etre GENEREUX sans rien couter au cas nominal.
+   *
+   * C'est le modele `systemd Type=notify` : le service SIGNALE sa disponibilite, `TimeoutStartSec`
+   * (defaut 90 s) n'est qu'un dernier recours. Ici le signal est « le port accepte une connexion ».
+   * ⚠️ NE PAS revenir a une boucle bornee par le seul temps : elle transforme une machine lente en
+   * panne, et son message accuse alors le reseau (« suspecter un filtrage local ») a tort.
+   */
+  async _pollReady(port, budget = this.readyTimeoutMs, pid = null) {
     const t0 = Date.now();
     while (Date.now() - t0 < budget) {
-      if (await this._probeReady(port)) return true;
+      if (await this._probeReady(port)) return 'pret';
+      // FAIT EXACT : le noyau dit que le process n'existe plus. Continuer a sonder un mort serait
+      // une inference pure — et ferait attendre le budget entier pour rien.
+      if (pid != null && !isPidAlive(pid)) return 'mort';
       await this._delay(READY_POLL_MS);
     }
-    return false;
+    return 'muet'; // vivant mais silencieux : le seul cas reellement indecidable
   }
 
   // ---------- coeur : garantir un serveur pour un profil ----------
@@ -406,10 +430,19 @@ export class Supervisor {
       // demarrait tres bien : il a coute 3 h d'enquete le 31/07). On nomme ce qu'on SAIT (N tentatives,
       // ports differents) et ce qu'on SUPPOSE, sans jamais presenter l'un pour l'autre.
       if (pid == null) {
+        // ⚠️ Le message DISTINGUE les deux echecs, qui n'ont RIEN a voir (refonte 02/08). Le
+        // precedent affirmait « le process demarre mais ne repond pas sur la loopback : suspecter
+        // un filtrage local » — une SUPPOSITION presentee comme un constat, qui envoyait le
+        // diagnostic sur le reseau alors que le serveur pouvait etre mort a la seconde, ou
+        // simplement lent. On ne nomme desormais que ce qu'on a MESURE.
+        const detail =
+          this._dernierVerdict === 'mort'
+            ? `le process s'est ARRETE de lui-meme avant d'ecouter — la cause est dans sa sortie, ` +
+              `pas dans le reseau (verifier la commande, les droits, le --user-data-dir deja verrouille)`
+            : `le process etait TOUJOURS VIVANT mais n'ecoutait pas encore apres ${this.readyTimeoutMs}ms ` +
+              `— machine tres chargee (un demarrage lent n'est PAS une panne) ou filtrage local`;
         throw new Error(
-          `serveur ${profile} injoignable apres ${SPAWN_ATTEMPTS} tentatives sur ${SPAWN_ATTEMPTS} ports differents ` +
-          `(${this.readyTimeoutMs}ms chacune). Le process demarre mais ne repond pas sur la loopback : ` +
-          `suspecter un filtrage local (antivirus/VPN/pare-feu), PAS le serveur lui-meme.`
+          `serveur ${profile} injoignable apres ${SPAWN_ATTEMPTS} tentatives sur ${SPAWN_ATTEMPTS} ports differents : ${detail}`
         );
       }
 
@@ -472,7 +505,10 @@ export class Supervisor {
     // est bien le notre. Toute lecture ulterieure sera comparee a celle-ci avant un kill.
     const identity = processIdentity(pid);
     this._write(withServer(this._read(), profile, { port, pid, identity, startedAt: this._now(), state: STATE_STARTING }));
-    if (await this._pollReady(port, budgetMs)) return pid;
+    // ⚠️ On RETIENT le verdict : 'mort' et 'muet' ne sont PAS le meme echec, et l'appelant en a
+    // besoin pour ecrire un message honnete (un process mort n'a rien a voir avec la loopback).
+    this._dernierVerdict = await this._pollReady(port, budgetMs, pid);
+    if (this._dernierVerdict === 'pret') return pid;
     try { treeKill(pid); } catch {}
     // Tentative RATEE : on retire l'intention qu'on vient d'inscrire. Le pid vient d'etre tue ; laisser
     // l'entree ferait croire a un serveur existant (et figerait son port pour l'essai suivant).
