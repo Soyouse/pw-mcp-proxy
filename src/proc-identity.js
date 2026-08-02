@@ -70,6 +70,14 @@ export function processIdentity(pid, env = {}) {
 
   // macOS/BSD — `lstart` donne l'instant de demarrage absolu (`etime` donnerait une DUREE, qui
   // change a chaque lecture : inutilisable comme identite).
-  const out = runSync('ps', ['-p', String(pid), '-o', 'lstart=']);
+  //
+  // ⚠️ `-x` OBLIGATOIRE, et ce n'est PAS un detail de confort : sur BSD/macOS, `ps` ne liste par
+  //    defaut que les process RATTACHES A UN TERMINAL. Or nos serveurs sont spawnes `detached`
+  //    (donc sans TTY) ⇒ sans `-x` ils sont INVISIBLES, `ps` sort en status 1, l'identite est
+  //    illisible, le verdict devient `unknown` et **le reap cesse de nettoyer quoi que ce soit
+  //    sur macOS** — fuite de serveurs silencieuse. Bug REEL, revele par le 1er run CI macOS du
+  //    2026-08-02 (2 tests de reap rouges) ; Windows et Linux ne pouvaient pas l'exhiber :
+  //    Linux lit /proc, Windows passe par CIM. NE JAMAIS retirer `-x`.
+  const out = runSync('ps', ['-x', '-p', String(pid), '-o', 'lstart=']);
   return out ? parseLstart(out) : null;
 }
