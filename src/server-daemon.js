@@ -48,7 +48,11 @@ export class ServerDaemon {
     this._attendre = options.attendre || attendreReady;
     this._budgetMs = options.budgetMs ?? READY_TIMEOUT_MS;
 
-    this.nomCanal = daemonChannelName(this.env);
+    // ⚠️ Le nom peut être IMPOSÉ par le lanceur (il l'a déjà calculé pour s'y connecter). Le
+    // recalculer serait une SECONDE vérité : si les deux calculs divergent — env, utilisateur,
+    // tmpdir — le daemon écoute un canal que personne n'appelle, et le client conclut « aucun
+    // daemon » en boucle. Mesuré le 02/08 : 4 tests bout-en-bout rouges pour cette seule raison.
+    this.nomCanal = options.nomCanal || daemonChannelName(this.env);
     this._serveur = null;
     /** profil -> {port, pid, url, clients:Set<net.Socket>} */
     this._profils = new Map();
