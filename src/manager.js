@@ -9,7 +9,6 @@ import process from 'node:process';
 import { Backend } from './backend.js';
 import { StdioTransport } from './stdio-transport.js';
 import { HttpTransport } from './http-transport.js';
-import { Supervisor } from './supervisor.js';
 import { log } from './logger.js';
 import { alert } from './notify.js';
 import { sweepByCmd, listProcesses } from './prockill.js';
@@ -43,7 +42,6 @@ export class Manager {
     this.clientInfo = { ...DEFAULT_CLIENT_INFO }; // remplace au handshake Claude
     this.onNewBackend = null; // set par le Router (wiring des events)
     this.onConfigChange = null; // set par le Router (re-emet tools/list_changed)
-    this.supervisor = null; // lazy : cree au 1er profil HTTP (mode stdio pur => jamais instancie)
     this._watchdogOptions = options.watchdog || {};
     this._autoRestartOptions = {
       maxRestarts: options.autoRestart?.maxRestarts ?? DEFAULT_MAX_RESTARTS,
@@ -64,12 +62,6 @@ export class Manager {
   _isHttp(profile) {
     const p = this.config.profiles[profile] || {};
     return p.http !== undefined ? !!p.http : !!this.config.http;
-  }
-
-  _sup() {
-    // ntfyUrl config-first (comme le Router/notify) : dead-man des serveurs partages (mort inattendue).
-    if (!this.supervisor) this.supervisor = new Supervisor(this.configPath, { ntfyUrl: this.config.ntfyUrl });
-    return this.supervisor;
   }
 
   _loadConfig() {
@@ -345,25 +337,9 @@ export class Manager {
     for (const p of [...this._connexions.keys()]) this._closeConnexion(p);
   }
 
-  // Au moins un profil en mode HTTP (=> supervision de serveurs partages requise) ?
-  _anyHttp() {
-    return Object.keys(this.config.profiles).some((p) => this._isHttp(p));
-  }
-
-  // Boot du multi-agent (HTTP) : boot-reap (purge les serveurs d'anciennes sessions morts/idle) puis
-  // demarre le reaper periodique (dead-man des serveurs partages). No-op en mode stdio pur.
-  // REMPLACE l'ancien boot-sweep global + lock d'abdication (incompatibles avec le serveur partage :
-  // ils tueraient le serveur qu'un AUTRE agent utilise / feraient abdiquer un proxy vivant).
-  async bootSupervision() {
-    if (!this._anyHttp()) return;
-    const s = this._sup();
-    await s.reap();
-    s.startReaper();
-  }
-
-  // Arret propre de CE proxy : retire mes heartbeats + stoppe le reaper. NE tue AUCUN serveur partage
-  // (d'autres agents peuvent l'utiliser) — le reaper s'en charge s'il devient orphelin.
-  async stopSupervision() {
-    if (this.supervisor) await this.supervisor.shutdown();
-  }
+  // ⚠️ PLUS AUCUNE SUPERVISION ICI — supprimee le 02/08 avec le superviseur. Le cycle de vie des
+  // serveurs partages appartient au DAEMON, qui en est le PARENT : il les demarre a la demande et
+  // les arrete quand leur derniere socket se ferme. Il n'y a plus rien a amorcer au boot, plus
+  // rien a purger, plus aucun heartbeat a retirer a l'arret. NE PAS reintroduire de boot-sweep ni
+  // de lock d'abdication : ils tueraient le serveur qu'un AUTRE agent utilise.
 }

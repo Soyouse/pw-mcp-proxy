@@ -71,48 +71,20 @@ export function handshakeFitsBudget(clientBudget = DEFAULT_CLIENT_BUDGET_MS) {
 // le demarrage d'un serveur se poursuit EN ARRIERE-PLAN sans tenir la connexion en otage. Les lier
 // serait un faux couplage. Ils vivent ici uniquement pour la SOURCE UNIQUE.
 
-// ⚠️ Nombre de DEMARRAGES tentes, chacun sur un port NEUF demande a l'OS (cf port-alloc.js). Ce n'est
-// PAS un delai mais une politique de reessai — elle vit ici pour la meme raison : source unique.
-// Traite la fenetre TOCTOU de l'allocation ephemere (port raffle entre notre close et le bind serveur).
-// ⚠️ BORNE OBLIGATOIRE : sans elle, une machine ou AUCUN port ne repond boucle a l'infini au boot et
-// tient la connexion MCP jusqu'a ce que Claude raccroche (la panne metastable du 31/07, reconstituee).
-// 3 = deux reessais. L'OS rendant un port DIFFERENT a chaque fois, 3 echecs consecutifs ne signalent
-// plus une malchance de port mais un filtrage local — que le message d'erreur nomme explicitement.
-export const SPAWN_ATTEMPTS = 3;
-
 export const READY_TIMEOUT_MS = 20000; // budget d'attente qu'un serveur NEUF reponde sur /mcp
 
-// ⚠️ Patience des REESSAIS (tentatives 2..N), volontairement PLUS COURTE que la premiere.
-// Justification MESUREE, pas un reglage arbitraire : les 20 s de READY_TIMEOUT_MS existent pour le
-// tout premier lancement, ou `npx` peut TELECHARGER @playwright/mcp. Des la tentative 2, ce cout est
-// deja paye (paquet en cache) : un serveur qui va demarrer repond en 1-3 s. Attendre 20 s de plus
-// n'apporte donc RIEN et transforme le pire cas en 60 s — au-dela du mur client (30 s), ce qui
-// rendrait une liste d'outils degradee la ou une reponse complete etait encore possible.
-// Pire cas desormais : 20 + 10 + 10 = 40 s, et le handshake borne protege deja la session.
-// ⚠️ NE PAS descendre trop bas : si la 1re tentative a echoue PENDANT un telechargement, la 2e doit
-// encore laisser un demarrage a froid aboutir. 10 s = large pour un boot chaud, suffisant a froid.
-export const RETRY_READY_TIMEOUT_MS = 10000;
 export const READY_POLL_MS = 200; // periode de sondage pendant cette attente
 // Budget d'UNE sonde HTTP (pas de l'attente entiere). Etait en DUR (`2000`) dans supervisor.js —
 // remonte ici le 02/08 : budget.js est la SOURCE UNIQUE, un delai en dur ailleurs derive en silence.
 // ⚠️ C'est le temps accorde a UNE requete sur la loopback ; l'attente globale, elle, est bornee par
 // READY_TIMEOUT_MS et surtout interrompue par un FAIT (process mort) — cf readiness.js.
 export const PROBE_TIMEOUT_MS = 2000;
-export const LOCK_STALE_MS = 60000; // verrou plus vieux que ca = vole (proxy mort en le tenant)
-export const LOCK_WAIT_MS = 30000; // patience max a l'acquisition du verrou de registre
-export const LOCK_RETRY_MS = 50; // periode de spin sur le verrou
-export const SERVER_TTL_MS = 90000; // sans heartbeat client depuis ca => serveur reape
-export const HEARTBEAT_MS = 30000; // periode de battement client (< ttl/2 => 2 battements avant reap)
 
 // Marge au-dela de laquelle une entree `starting` du registre est declaree MORTE-NEE.
 // LIEN CAUSAL REEL (c'est pour ca qu'elle DERIVE) : passe le budget de readiness, un serveur qui n'a
 // toujours pas ete promu ne le sera JAMAIS — le proxy qui le pollait est mort avant de le promouvoir.
 // Le facteur > 1 couvre l'ecart entre le spawn et le debut du poll (jamais un reap d'un demarrage sain).
-export const START_STALE_FACTOR = 1.5;
 
-export function startStaleMs(readyTimeout = READY_TIMEOUT_MS) {
-  return Math.floor(readyTimeout * START_STALE_FACTOR);
-}
 
 // ⚠️ Delais RAPATRIES ici par le gate statique  (31/07) : ils vivaient en dur
 // dans manager.js et notify.js. Aucun n'etait faux — mais c'est EXACTEMENT la dispersion couche par

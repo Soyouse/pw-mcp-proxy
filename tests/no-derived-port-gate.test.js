@@ -17,6 +17,8 @@ import { test, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import net from 'node:net';
+import { allocateEphemeralPort } from '../src/port-alloc.js';
 
 const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
 const lire = (f) => fs.readFileSync(path.join(SRC, f), 'utf8');
@@ -70,48 +72,40 @@ test('GATE : aucun port TCP en dur passe au backend (--port suivi d un litteral)
   expect(coupables, 'seul l OS choisit le port (listen(0)) ; aucun numero en dur nulle part').toEqual([]);
 });
 
-test('GATE : supervisor.js obtient son port UNIQUEMENT via port-alloc.js', () => {
-  // ⚠️ Source UNIQUE d'allocation. Si un jour le superviseur fabrique son port autrement, tout le
+test('GATE : le daemon obtient son port UNIQUEMENT via port-alloc.js', () => {
+  // ⚠️ Source UNIQUE d'allocation. Si un jour le daemon fabrique son port autrement, tout le
   // raisonnement (« le port est forcement libre ») s'effondre en silence.
-  const sup = lire('supervisor.js');
-  expect(sup, 'import de l allocateur obligatoire').toMatch(/from\s+['"]\.\/port-alloc\.js['"]/);
-  expect(codeSeul(sup), 'le port frais vient de l allocateur injecte').toMatch(/_allocatePort\s*\(/);
+  const d = lire('server-daemon.js');
+  expect(d, 'import de l allocateur obligatoire').toMatch(/from\s+['"]\.\/port-alloc\.js['"]/);
+  expect(codeSeul(d), 'le port frais vient de l allocateur injecte').toMatch(/_allouerPort\s*\(/);
 });
 
-test('GATE : port-alloc alloue sur la LOOPBACK, jamais sur toutes les interfaces', () => {
-  // ⚠️ Libre sur 0.0.0.0 ≠ libre sur 127.0.0.1. Le serveur bind `localhost` : interroger l'OS sur une
-  // AUTRE interface rendrait un port « valide » que le backend n'arriverait pas a prendre.
-  const code = codeSeul(lire('port-alloc.js'));
-  expect(code, 'listen(0) = demande a l OS').toMatch(/listen\s*\(\s*0\s*,/);
-  expect(code, 'jamais 0.0.0.0 : ce n est pas la meme interface que le bind du serveur').not.toMatch(/0\.0\.0\.0/);
+// 🛑 GATE NE LE 02/08 APRES UN BUG REEL : `'localhost'` != `'127.0.0.1'`. Sur double pile,
+// `localhost` resout d'abord en `::1`. On allouait le port sur l'IPv4 pendant que le serveur
+// bindait l'IPv6 => « serveur VIVANT mais silencieux apres 20000ms », impute a tort a la charge.
+// L'invariant n'est PAS « allouer sur la loopback » (trop vague, c'est ce qui a permis le bug) :
+// c'est « allouer sur LA MEME CHAINE que le --host du serveur ». On le verifie DE BOUT EN BOUT.
+test('GATE : le port alloue est REELLEMENT bindable par le serveur (meme pile d adresses)', async () => {
+  const port = await allocateEphemeralPort();
+  // On rejoue EXACTEMENT ce que fait le serveur : bind sur la chaine `--host` du daemon.
+  const ok = await new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.on('error', () => resolve(false));
+    srv.listen(port, 'localhost', () => srv.close(() => resolve(true)));
+  });
+  expect(ok, 'un port alloue AILLEURS que la ou le serveur bind est un port MORT').toBe(true);
 });
 
-// ---------- 2. le WRITE-AHEAD ne s'inverse JAMAIS ----------
-test('GATE : l intention `starting` est ECRITE AVANT le poll de readiness (ordre, pas presence)', () => {
-  // ⚠️ Inverser cet ordre recree l'ORPHELIN INVISIBLE : un serveur DETACHE existe des le spawn ; s'il
-  // n'est inscrit qu'apres ~20 s de poll, toute mort du proxy dans l'intervalle laisse un process
-  // vivant que PERSONNE ne connait => panne metastable (le remede fabrique la cause suivante).
-  // On verifie l'ORDRE dans le source : une simple presence des deux appels ne prouverait rien.
-  const code = codeSeul(lire('supervisor.js'));
-  const debut = code.indexOf('_spawnReady');
-  const zone = code.slice(debut);
-  const iEcriture = zone.indexOf('STATE_STARTING');
-  const iPoll = zone.indexOf('_pollReady');
-  expect(iEcriture, 'l entree `starting` doit etre ecrite dans _spawnReady').toBeGreaterThan(-1);
-  expect(iPoll, 'le poll doit exister').toBeGreaterThan(-1);
-  expect(iEcriture, 'INSCRIRE L INTENTION AVANT L ACTION — jamais l inverse').toBeLessThan(iPoll);
+test('GATE : l allocateur et le daemon nomment le MEME hote (jamais deux littéraux)', () => {
+  const daemon = lire('server-daemon.js');
+  const alloc = lire('port-alloc.js');
+  const hoteDaemon = /BIND_HOST\s*=\s*'([^']+)'/.exec(daemon)?.[1];
+  const hoteAlloc = /HOTE_PAR_DEFAUT\s*=\s*'([^']+)'/.exec(alloc)?.[1];
+  expect(hoteDaemon, 'le daemon declare son hote de bind').toBeTruthy();
+  expect(hoteAlloc, 'l allocateur declare son hote par defaut').toBeTruthy();
+  expect(hoteAlloc, 'DEUX vérités sur l hote = un port alloue sur la mauvaise pile').toBe(hoteDaemon);
 });
 
-test('GATE : `startedAt` (spawn) et `spawnedAt` (promotion) restent DEUX champs distincts', () => {
-  // ⚠️ Les fusionner raccourcirait la grace de boot du reaper de toute la duree du demarrage =>
-  // un serveur SAIN en cours de boot se ferait tuer. Regression silencieuse, tres difficile a voir.
-  const reg = codeSeul(lire('server-registry.js'));
-  expect(reg).toMatch(/startedAt/);
-  expect(reg).toMatch(/spawnedAt/);
-  expect(reg, 'promoteServer pose spawnedAt A LA PROMOTION').toMatch(/promoteServer[\s\S]{0,400}spawnedAt/);
-});
-
-// ---------- 3. le HANDSHAKE reste borne ----------
 test('GATE : le handshake du router passe par deadline.js (jamais une attente sans borne)', () => {
   // ⚠️ C'est l'attente SANS BORNE d'`initialize` qui a tue la session du 31/07 : un serveur stdio
   // n'est JAMAIS reconnecte automatiquement par Claude Code. Retirer cette borne = session morte.

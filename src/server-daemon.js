@@ -59,6 +59,8 @@ export class ServerDaemon {
     /** promesses de démarrage en cours : sérialise les demandes concurrentes du MÊME profil */
     this._enCours = new Map();
     this._arrete = false;
+    // ⚠️ Rappel du PROPRIETAIRE du process (daemon-main). La classe ne sort JAMAIS elle-meme.
+    this.onArret = options.onArret || null;
   }
 
   /**
@@ -89,6 +91,12 @@ export class ServerDaemon {
     // ⚠️ Un client qui disparaît brutalement ne doit JAMAIS faire tomber le daemon : il sert N
     // agents, l'un d'eux ne peut pas les priver tous de navigateur.
     sock.on('error', () => {});
+    // 🛑 FUITE MESUREE LE 02/08 (2 daemons orphelins observes) : `arreter()` n'etait appele QUE
+    // depuis `_liberer`, donc un daemon qui n'a JAMAIS servi de profil — course perdue, client
+    // parti avant sa demande, demarrage de serveur en echec — restait vivant POUR TOUJOURS. Un par
+    // occurrence, silencieusement. Ici la question est posee a CHAQUE depart : « reste-t-il quelque
+    // chose a faire ? ». Zero profil ET zero client = ce process n'a plus d'objet.
+    sock.on('close', () => this._sortirSiInutile());
     const lecteur = new NdjsonReader(sock);
     lecteur.on('parse_error', () => this._repondre(sock, reponseErreur('message illisible')));
     lecteur.on('message', (msg) => this._onMessage(sock, msg));
@@ -191,6 +199,25 @@ export class ServerDaemon {
     if (this._profils.size === 0) this.arreter();
   }
 
+  /**
+   * Ce daemon a-t-il encore une raison d'exister ? Zéro profil servi ET zéro client connecté.
+   * ⚠️ Les DEUX conditions : un client peut être connecté sans (encore) tenir de profil — sortir
+   * là le laisserait sans réponse. Et un profil peut vivre pendant qu'un client se reconnecte.
+   * ⚠️ Le nombre de connexions est demandé au SERVEUR (donc au noyau), jamais compté à la main :
+   * un compteur maison finirait par diverger, et c'est exactement ce que ce refactor supprime.
+   */
+  _sortirSiInutile() {
+    if (this._arrete || this._profils.size > 0) return;
+    // ⚠️ CETTE CLASSE NE SORT JAMAIS DU PROCESS. Elle est instanciée telle quelle par les tests :
+    // un `process.exit()` ici tuerait le worker de test. Elle s'ARRÊTE, et c'est `daemon-main`
+    // (seul propriétaire du process) qui en tire la conséquence via `onArret`.
+    this._serveur?.getConnections((err, n) => {
+      if (err || n > 0) return;
+      log('[daemon] plus aucun profil ni client — arrêt');
+      this.arreter();
+    });
+  }
+
   /** Arrêt propre. ⚠️ La correction n'en dépend PAS : à la mort du process, le noyau libère tout. */
   arreter() {
     if (this._arrete) return;
@@ -204,6 +231,7 @@ export class ServerDaemon {
     // PROPRE ; le cas du crash reste couvert côté client (ECONNREFUSED ⇒ unlink ⇒ re-listen).
     if (channelIsFile(this.env)) { try { fs.unlinkSync(this.nomCanal); } catch {} }
     log('[daemon] arrêté');
+    try { this.onArret?.(); } catch (e) { log(`[daemon] onArret: ${describeError(e)}`); }
   }
 
   /** Observabilité (tests + diagnostic) : qui est servi, et par combien de clients. */

@@ -30,29 +30,18 @@ process.on('unhandledRejection', (e) => log('unhandledRejection: ' + describeErr
 const manager = new Manager(configPath);
 const router = new Router(manager, process.stdout, pkg.version);
 
-// MULTI-AGENT : PLUS de lock d'abdication ni de boot-sweep global (ils tueraient le serveur partage
-// qu'un AUTRE agent utilise / feraient abdiquer un proxy vivant). La coordination inter-proxys passe
-// desormais par le SUPERVISEUR (serveurs @playwright/mcp HTTP partages, ref-comptes ; cf supervisor.js).
-// bootSupervision() = boot-reap (purge les serveurs morts/idle d'anciennes sessions) + reaper periodique
-// (dead-man). No-op en mode stdio pur. NE PAS reintroduire de lock/boot-sweep global (regression P0-inverse
-// = casse le multi-agent). Le self-heal d'orphelin est CIBLE dans supervisor.ensureServer.
-// ⚠️ try/catch OBLIGATOIRE — NE PAS RETIRER. C'est un `await` de TOP-LEVEL : une exception ici
-// avorte l'evaluation du module ES => le process meurt AVANT de servir la moindre requete, et
-// `uncaughtException` ci-dessus ne la voit PAS (rien n'atterrit dans le fichier de log). Or la
-// supervision est un BONUS (serveurs HTTP partages) : le proxy sait servir sans elle, en stdio.
-// Un disque plein / un canal impossible doit DEGRADER, jamais tuer le MCP entier.
-try {
-  await manager.bootSupervision();
-} catch (e) {
-  log('bootSupervision a echoue, on sert SANS supervision (mode degrade): ' + describeError(e));
-}
+// MULTI-AGENT : PLUS de lock d'abdication ni de boot-sweep global (ils tueraient le serveur
+// partage qu'un AUTRE agent utilise). Il n'y a RIEN a amorcer ici : le DAEMON est lance a la
+// demande par le premier profil HTTP qui en a besoin (cf daemon-client.acquerirProfil), et il
+// s'arrete seul quand plus personne ne le tient. Le boot du proxy est donc redevenu trivial.
 
 let stopping = false;
 async function shutdown(reason) {
   if (stopping) return;
   stopping = true;
   log(reason);
-  try { await manager.stopSupervision(); } catch {} // retire mes heartbeats (ref-count), ne tue aucun serveur partage
+  // ⚠️ Fermer les sockets du daemon (dans stopAll) SUFFIT : il decompte et arrete ce qui n'a plus
+  // de client. Aucun heartbeat a retirer — il n'y en a plus.
   manager.stopAll();
   process.exit(0);
 }

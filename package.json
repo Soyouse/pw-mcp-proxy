@@ -13,7 +13,6 @@
     "test": "vitest run",
     "test:pure": "vitest run --config vitest.pure.config.js",
     "test:mut": "stryker run",
-    "test:spec": "node spec/check.mjs",
     "dup": "jscpd .",
     "arch": "depcruise --config .dependency-cruiser.cjs .",
     "coupling": "npm run dup && npm run arch"

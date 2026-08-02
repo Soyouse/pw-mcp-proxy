@@ -154,18 +154,11 @@ function _scanRuleUncached(rule) {
 // Leçon : un module PUR qui reçoit `now` en paramètre est parfaitement testable ET parfaitement
 // inférentiel. La pureté rend une supposition VÉRIFIABLE, jamais VRAIE.
 const BUDGET_INFERENCE = {
-  'server-registry.js': {
-    max: 3,
-    motif: 'DETTE',
-    pourquoi:
-      "⛔ NON JUSTIFIÉ — « ce client bat-il encore ? » est 100 % LOCAL : la fermeture de sa " +
-      'connexion au canal nommé est un ÉVÉNEMENT exact du noyau. Cible : 0 (refcount).',
-    impact:
-      'Si `now - lastSeen > ttl` décide FAUX : un agent VIVANT est jugé parti ⇒ son serveur est ' +
-      'reapé SOUS LUI ⇒ son navigateur disparaît en pleine action (scénario S5 violé). Le sens ' +
-      'inverse fuit un navigateur. ⚠️ Un agent lent à battre (machine chargée) est indistinguable ' +
-      "d'un agent mort — même faute que le poll de readiness, sur un autre horodatage.",
-  },
+  // ⛔ LA DETTE EST TOMBÉE À ZÉRO LE 02/08. `server-registry.js` (3 comparaisons d'horodatage,
+  // « ce client bat-il encore ? ») et `supervisor.js` (4) ont été SUPPRIMÉS avec le registre : la
+  // question ne se pose plus, la fermeture de la socket est un ÉVÉNEMENT exact du noyau.
+  // ⚠️ Plus AUCUNE entrée `motif: 'DETTE'` ne subsiste ici. En réintroduire une exige de démontrer
+  // qu'aucune autorité locale ne peut répondre — sinon c'est le bug du 31/07 qui revient.
   // ⚠️ 1 comparaison : la borne de boucle de `attendreReady`. Le budget n'y est qu'un FILET —
   // les deux issues utiles (port qui répond / process mort) sont des faits SANS délai.
   'readiness.js': {

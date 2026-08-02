@@ -32,7 +32,13 @@ process.on('unhandledRejection', (e) => log('daemon unhandledRejection: ' + desc
 // canal que personne n'écoute. Une seule source, celle qui a besoin de s'y connecter.
 // Repli sur le calcul local uniquement si lancé à la main (diagnostic).
 const canalImpose = process.argv[2];
-const daemon = new ServerDaemon(canalImpose ? { nomCanal: canalImpose } : {});
+// ⚠️ `onArret` : le daemon s'arrete SEUL des qu'il n'a plus ni profil ni client. C'est ICI, et
+// nulle part ailleurs, qu'on en tire la sortie du process — la classe est instanciee telle quelle
+// par les tests, un `process.exit()` en son sein tuerait leur worker.
+const daemon = new ServerDaemon({
+  ...(canalImpose ? { nomCanal: canalImpose } : {}),
+  onArret: () => process.exit(0),
+});
 
 // ⚠️ try/catch OBLIGATOIRE : `await` de top-level. Une exception y avorte le module ⇒ le process
 // meurt sans rien signaler, et le lanceur attendrait un `ready` qui ne viendra jamais.

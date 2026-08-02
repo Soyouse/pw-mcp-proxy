@@ -43,7 +43,16 @@ export async function acquerirProfil(profile, spec, env = {}) {
 
   for (let essai = 1; essai <= MAX_ESSAIS; essai++) {
     const sock = await connecter(nomCanal, env);
-    if (sock) return await demander(sock, profile, spec, nomCanal);
+    if (sock) {
+      const rep = await demander(sock, profile, spec, nomCanal);
+      // ⚠️ `null` = le daemon s'est FERMÉ avant de répondre. COURSE RÉELLE, mesurée le 02/08 : le
+      // dernier client d'un daemon s'en va, celui-ci sort (il n'a plus d'objet) et un autre proxy
+      // se connecte pendant sa sortie — sa socket est acceptée puis tombe. C'est un FAIT du noyau,
+      // pas une lenteur : on reboucle et on en lance un neuf. Sans ça, l'agent malchanceux
+      // n'obtient JAMAIS son navigateur, pour une raison qu'il ne peut pas comprendre.
+      if (rep) return rep;
+      continue;
+    }
 
     // Aucun daemon : en lancer un et ATTENDRE SON SIGNAL (jamais sonder en boucle).
     const signal = await lancerDaemon(nomCanal);
@@ -76,11 +85,15 @@ function connecter(nomCanal, env) {
   });
 }
 
+/**
+ * @returns {Promise<{url:string,connexion:net.Socket}|null>} `null` = le daemon s'est fermé avant
+ *          de répondre (il sortait) : à l'appelant de reboucler — ce n'est PAS une erreur du profil.
+ */
 function demander(sock, profile, spec, nomCanal) {
   return new Promise((resolve, reject) => {
     const lecteur = new NdjsonReader(sock);
-    // Le daemon meurt avant de répondre : fait exact, échec immédiat (aucune attente).
-    const coupe = () => reject(new Error(`daemon ${nomCanal} : connexion fermée avant réponse`));
+    // Le daemon disparaît avant de répondre : fait exact, verdict immédiat (aucune attente).
+    const coupe = () => resolve(null);
     lecteur.once('close', coupe);
     lecteur.once('message', (msg) => {
       lecteur.removeListener('close', coupe);

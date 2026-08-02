@@ -10,7 +10,6 @@
     "src/collision.js",
     "src/prockill-pure.js",
     "src/spec.js",
-    "src/server-registry.js",
     "src/sse-parse.js",
     "src/spawn-cmd.js",
     "src/log-rotate.js",
@@ -20,9 +19,6 @@
     "src/deadline.js",
     "src/error-detail.js",
     "src/channel-name.js",
-    "src/proc-identity-pure.js",
-    "src/clock.js",
-    "src/listening-line.js",
     "src/daemon-protocol.js"
   ],
   "reporters": [
