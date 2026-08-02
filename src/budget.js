@@ -71,7 +71,19 @@ export function handshakeFitsBudget(clientBudget = DEFAULT_CLIENT_BUDGET_MS) {
 // le demarrage d'un serveur se poursuit EN ARRIERE-PLAN sans tenir la connexion en otage. Les lier
 // serait un faux couplage. Ils vivent ici uniquement pour la SOURCE UNIQUE.
 
-export const READY_TIMEOUT_MS = 20000; // budget d'attente qu'un serveur NEUF reponde sur /mcp
+// 🛑 FILET, JAMAIS COUPERET — et volontairement GENEREUX.
+// ⚠️ 20000 etait un chiffre ARBITRAIRE, et il coupait des demarrages SAINS : mesure du 02/08 sur
+// une machine a ~93 process node (cas NORMAL chez l'utilisateur — « la charge ne nous regarde
+// pas »), la chaine gardien + serveur depasse parfois 20 s => serveur sain declare « muet ».
+// ⚠️ ALLONGER NE COUTE RIEN AU CAS D'ECHEC : la MORT du process est un FAIT detecte
+// immediatement (`isPidAlive`, cf readiness.js) et coupe l'attente sans consommer le budget. Ce
+// budget ne s'applique donc QU'AU seul cas reellement indecidable — vivant mais pas encore pret.
+// ⚠️ ET IL NE FAIT PENDRE PERSONNE : le handshake du router est borne separement (`withDeadline`)
+// et rend une reponse DEGRADEE puis rattrape par `tools/list_changed` — la session survit.
+// ANCRAGE EXTERNE plutot qu'un reglage maison : `systemd` accorde **90 s** a un service pour
+// signaler qu'il est pret (`DefaultTimeoutStartSec`, man systemd-system.conf). On s'aligne sur la
+// reference de l'industrie pour exactement la meme question.
+export const READY_TIMEOUT_MS = 90000; // budget d'attente qu'un serveur NEUF reponde sur /mcp
 
 export const READY_POLL_MS = 200; // periode de sondage pendant cette attente
 // Budget d'UNE sonde HTTP (pas de l'attente entiere). Etait en DUR (`2000`) dans supervisor.js —

@@ -14,6 +14,22 @@
 // L'EOF n'est pas un indice, c'est l'evenement. Zero horloge, zero heartbeat, zero TTL — la MEME
 // primitive que le refcount du daemon, appliquee un etage plus bas.
 //
+// ⚠️ POURQUOI PAS L'IPC NODE (`stdio:'ipc'` + evenement `disconnect`) — alternative la plus
+// souvent citee, VERIFIEE A LA SOURCE le 02/08/2026 (nodejs.org/api/child_process.html) :
+// la doc officielle decrit `'disconnect'` comme emis « after calling subprocess.disconnect() in
+// parent process or process.disconnect() in child process » — donc sur un APPEL EXPLICITE. Elle
+// ne dit RIEN de la mort du parent. S'y fier serait bâtir sur du NON CONTRACTUEL, qui peut changer
+// sans préavis. L'EOF sur un tuyau, lui, est garanti par l'OS : POSIX (`read()` rend 0 quand
+// toutes les extremites d'ecriture sont fermees) et Win32 (`ERROR_BROKEN_PIPE`). On depend du
+// noyau, pas d'un detail d'implementation de Node — c'est le contrat le plus stable disponible.
+//
+// 🛑 LA CONDITION DE VALIDITE, ET ELLE EST ABSOLUE : l'EOF n'arrive QUE si PERSONNE d'autre ne
+// detient l'extremite d'ECRITURE de notre stdin. Un descripteur qui fuit vers un autre process =
+// EOF qui n'arrive JAMAIS = orphelin silencieux, indiagnosticable.
+// ⚠️ C'est pourquoi notre enfant est lance en `stdio:'ignore'` : il ne doit HERITER de rien.
+// NE JAMAIS lui passer 'inherit' ni un 'pipe' : on romprait le lien de vie sans aucun signal.
+// Scelle par `tests/child-guard.test.js` (DEUX serveurs tues par UNE mort de parent).
+//
 // ⚠️ POURQUOI PAS LE MECANISME NATIF DE L'OS : `prctl(PR_SET_PDEATHSIG)` (Linux) et les Job Objects
 // `KILL_ON_JOB_CLOSE` (Windows — ce qu'utilisent Chrome, VS Code, Docker Desktop) font exactement
 // ca dans le noyau, mais AUCUN n'est joignable depuis Node sans module natif. Le dépôt est a ZERO

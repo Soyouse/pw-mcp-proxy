@@ -11,6 +11,7 @@
 
 import { test, expect } from 'vitest';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { spawnTracked } from './harness.js'; // ⚠️ SEUL moyen de spawner (marqueur + ratchet)
 import { isPidAlive, listProcesses } from '../src/prockill.js';
@@ -69,3 +70,37 @@ test('commande INLANÇABLE : le gardien SORT, il ne reste jamais un process qui 
   expect(code, 'sortie NON NULLE : l échec est visible, jamais avalé').not.toBe(0);
   expect(isPidAlive(g.pid), 'aucun process fantôme derrière').toBe(false);
 }, 20000);
+
+// 🛑 FUITE DE DESCRIPTEUR — la seule facon dont ce mecanisme peut mourir en silence.
+// L'EOF n'arrive QUE si personne d'autre ne detient l'extremite d'ECRITURE du stdin du gardien.
+// Si un descripteur fuit (enfant lance en 'inherit', ou pipe partage entre deux gardiens), l'EOF
+// n'arrive JAMAIS et l'orphelin revient — sans le moindre message d'erreur.
+// Ce test lance DEUX gardiens depuis le MEME process : si les tuyaux fuitaient de l'un a l'autre,
+// fermer le premier ne suffirait pas, ou fermer les deux n'en tuerait qu'un.
+test('DEUX gardiens : chaque tuyau est INDEPENDANT (aucune fuite de descripteur)', async () => {
+  const m1 = `guard${process.pid}b1`;
+  const m2 = `guard${process.pid}b2`;
+  const g1 = lancerGardien(m1);
+  const g2 = lancerGardien(m2);
+  expect(await jusqua(async () => enfantDe(m1).length > 0 && enfantDe(m2).length > 0),
+    'préalable : les deux enfants tournent').toBe(true);
+
+  // On ne ferme QUE le premier tuyau.
+  g1.stdin.destroy();
+  expect(await jusqua(async () => enfantDe(m1).length === 0), 'l enfant 1 doit tomber').toBe(true);
+  expect(enfantDe(m2).length, "l enfant 2 ne doit RIEN subir : les tuyaux sont independants").toBeGreaterThan(0);
+
+  // Puis le second : il doit tomber AUSSI (donc son EOF n était pas retenu par le premier).
+  g2.stdin.destroy();
+  expect(await jusqua(async () => enfantDe(m2).length === 0),
+    'FUITE DE DESCRIPTEUR : l enfant 2 n a jamais recu son EOF').toBe(true);
+}, 60000);
+
+// GATE STATIQUE — l'invariant qui conditionne TOUT le mecanisme, verifie dans la source.
+test('GATE : le gardien ne transmet AUCUN descripteur à son enfant', () => {
+  const src = readFileSync(new URL('../src/child-guard.js', import.meta.url), 'utf8');
+  const spawnEnfant = /spawn\(command, args, \{([^}]*)\}/.exec(src)?.[1] || '';
+  expect(spawnEnfant, 'le spawn de l enfant doit être trouvable').not.toBe('');
+  expect(spawnEnfant, "stdio:'ignore' OBLIGATOIRE — 'inherit'/'pipe' feraient hériter le tuyau de vie")
+    .toMatch(/stdio:\s*'ignore'/);
+});
