@@ -36,7 +36,7 @@ export function treeKill(pid) {
       spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
     } else {
       // Backends spawnes en `detached` => group leader (pgid = pid) : -pid tue tout le groupe.
-      try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch {} }
+      try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch { /* SILENCE: process deja disparu — c'est le RESULTAT VOULU, pas un echec */ } }
     }
   } catch {
     /* best-effort : jamais throw au shutdown */

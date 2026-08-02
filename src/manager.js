@@ -231,7 +231,7 @@ export class Manager {
             const c = p.cmd.replace(/\\/g, '/');
             return c.includes(uddN) && /(chrome|chromium|headless_shell|msedge)/i.test(c) && !/node|npx|cmd\.exe/i.test(c);
           }).length;
-        } catch {}
+        } catch { /* SILENCE: diagnostic best-effort — un rapport de gel ne doit JAMAIS throw (cf freeze-report) */ }
       }
       log(formatFreezeReport({ profile, reason: 'unresponsive', serverPid, serverAlive, port, browserCount, missedPings: info.missedPings, inflight: info.inflight }));
     } catch (e) {

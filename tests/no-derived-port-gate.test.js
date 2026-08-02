@@ -19,6 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
 import { allocateEphemeralPort } from '../src/port-alloc.js';
+import { READY_TIMEOUT_MS } from '../src/budget.js';
 
 const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
 const lire = (f) => fs.readFileSync(path.join(SRC, f), 'utf8');
@@ -153,4 +154,16 @@ test('NEGATIVE-CHECK : les detecteurs rougissent bien sur du code fautif fabriqu
   const sain = codeSeul("srv.listen(0, '127.0.0.1', cb); const port = await this._allocatePort();");
   expect(/derivePort|PORT_BASE|PORT_SPAN/.test(sain)).toBe(false);
   expect(/\bport\s*[:=]\s*\d+/.test(sain), 'une allocation dynamique n est PAS un port en dur').toBe(false);
+});
+
+// 🛑 COHÉRENCE testTimeout ⟷ READY_TIMEOUT_MS — deux valeurs dans deux fichiers différents qui
+// DOIVENT rester ordonnées. Le 02/08, monter la readiness de 20 s à 90 s sans toucher au timeout
+// de test (30 s) a fait tomber 3 tests LIVE à 30 s pile : ils accusaient le produit alors que
+// c'était la config. Un test abattu AVANT que le code ne rende son verdict ne prouve rien.
+test('GATE : le timeout des tests DÉPASSE le budget de readiness (sinon le test ment)', () => {
+  const conf = lire('../vitest.config.js');
+  const timeout = Number(/testTimeout:\s*(\d+)/.exec(conf)?.[1]);
+  expect(timeout, 'testTimeout doit être déclaré explicitement').toBeGreaterThan(0);
+  expect(timeout, `testTimeout (${timeout}) doit dépasser READY_TIMEOUT_MS (${READY_TIMEOUT_MS}) avec marge`)
+    .toBeGreaterThan(READY_TIMEOUT_MS * 1.2);
 });

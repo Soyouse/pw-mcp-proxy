@@ -192,13 +192,13 @@ export class HttpTransport extends EventEmitter {
   async close() {
     if (this._closed) return;
     this._closed = true;
-    try { this._getAbort?.abort(); } catch {}
+    try { this._getAbort?.abort(); } catch { /* SILENCE: annuler un flux deja termine n'est pas une erreur */ }
     // DELETE explicite (SHOULD) : libere la session cote serveur. Best-effort.
     if (this.sessionId) {
       try {
         const res = await this._req('DELETE', this._headers({}));
         res.stream.resume();
-      } catch {}
+      } catch { /* SILENCE: DELETE de session = politesse envers un serveur peut-etre deja parti ; son echec ne change rien pour nous */ }
     }
     this.emit('close');
   }

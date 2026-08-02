@@ -240,7 +240,7 @@ export class Backend extends EventEmitter {
 
   stop() {
     this._stopWatchdog(); // ne pas laisser un interval de ping survivre a l'arret du backend
-    try { this.transport.close(); } catch {}
+    try { this.transport.close(); } catch { /* SILENCE: teardown — le transport est deja mort ou injoignable, il n'y a rien de plus a faire ni personne a prevenir */ }
     this.ready = false;
     this._startPromise = null;
   }

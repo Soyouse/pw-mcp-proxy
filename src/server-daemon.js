@@ -188,7 +188,10 @@ export class ServerDaemon {
 
     const verdict = await this._attendre(port, { budgetMs: this._budgetMs, pid, host: URL_HOST });
     if (verdict !== 'pret') {
-      try { this._tuer(pid); } catch {}
+      // ⚠️ PAS DE SILENCE ICI : si ce kill echoue, le serveur avorte SURVIT en tenant son
+      // `--user-data-dir`, et plus personne ne le connait (on n'a jamais inscrit ce profil).
+      // C'est exactement l'orphelin que tout le reste du design supprime — il DOIT crier.
+      try { this._tuer(pid); } catch (e) { log(`[daemon:${profil}] FUITE POSSIBLE — arret du serveur avorte impossible (pid=${pid}): ${describeError(e)}`); }
       throw new Error(
         verdict === 'mort'
           ? `profil ${profil} : le serveur s'est ARRÊTÉ avant d'écouter (cause dans sa sortie, pas le réseau)`
@@ -255,10 +258,10 @@ export class ServerDaemon {
       try { this._tuer(etat.pid); } catch (e) { log(`[daemon:${profil}] arrêt: ${describeError(e)}`); }
     }
     this._profils.clear();
-    try { this._serveur?.close(); } catch {}
+    try { this._serveur?.close(); } catch { /* SILENCE: arret — le noyau detruit le canal a la mort du process de toute facon */ }
     // POSIX : le fichier socket survit à close(). Le retirer évite une orpheline après une sortie
     // PROPRE ; le cas du crash reste couvert côté client (ECONNREFUSED ⇒ unlink ⇒ re-listen).
-    if (channelIsFile(this.env)) { try { fs.unlinkSync(this.nomCanal); } catch {} }
+    if (channelIsFile(this.env)) { try { fs.unlinkSync(this.nomCanal); } catch { /* SILENCE: fichier deja retire (autre daemon, nettoyage OS) ; le client sait traiter une socket orpheline via ECONNREFUSED */ } }
     log('[daemon] arrêté');
     try { this.onArret?.(); } catch (e) { log(`[daemon] onArret: ${describeError(e)}`); }
   }

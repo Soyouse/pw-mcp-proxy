@@ -38,8 +38,8 @@ function _rotate() {
     // Silence DELIBERE (x2) : le logger ne peut pas se logguer lui-meme sans recursion infinie.
     // Un echec ici (course avec un autre proxy, verrou Windows) est RATTRAPE par le filet dur
     // ci-dessous, qui garantit la borne quoi qu'il arrive. Aucune information n'est donc perdue.
-    try { if (fs.existsSync(to)) fs.unlinkSync(to); } catch {}
-    try { if (fs.existsSync(from)) fs.renameSync(from, to); } catch {}
+    try { if (fs.existsSync(to)) fs.unlinkSync(to); } catch { /* SILENCE: rotation best-effort — logguer un echec de log est RECURSIF (le remede devient la panne) */ }
+    try { if (fs.existsSync(from)) fs.renameSync(from, to); } catch { /* SILENCE: idem — un fichier verrouille par un autre process ne doit pas tuer le proxy */ }
   }
   // ⚠️ FILET DUR — NE PAS RETIRER. Si le fichier courant SURVIT au plan, la borne disque serait
   // perdue EN SILENCE (croissance infinie = usure SSD). Deux cas REELS :
@@ -48,7 +48,7 @@ function _rotate() {
   //     ouvert au meme instant — le catch ci-dessus l'avale, la rotation n'a PAS eu lieu.
   // truncateSync, lui, n'exige pas l'exclusivite : il ramene la generation courante a zero.
   // Le cap devient une borne DURE quel que soit le nombre de proxys concurrents.
-  try { if (_realSize() > maxBytes) fs.truncateSync(logFile, 0); } catch {}
+  try { if (_realSize() > maxBytes) fs.truncateSync(logFile, 0); } catch { /* SILENCE: filet de derniere ligne sur la taille ; son echec ne justifie pas de tomber */ }
 }
 
 export function log(...args) {
@@ -60,7 +60,7 @@ export function log(...args) {
   // ferait tomber le proxy — le remede deviendrait la panne. Le fichier reste, lui, disponible.
   try {
     process.stderr.write(line);
-  } catch {}
+  } catch { /* SILENCE: OBLIGATOIRE — stderr ferme/plein. Logguer ici serait RECURSIF et tuerait le proxy */ }
   if (!enabled) return;
   const lineBytes = Buffer.byteLength(line);
   // Silence DELIBERE : disque plein, chemin devenu invalide, course de rotation avec un autre
@@ -69,5 +69,5 @@ export function log(...args) {
   try {
     if (shouldRotate(_realSize(), lineBytes, maxBytes)) _rotate();
     fs.appendFileSync(logFile, line);
-  } catch {}
+  } catch { /* SILENCE: cf ci-dessus — logguer l'echec du log serait RECURSIF ; le signal est deja parti sur stderr */ }
 }

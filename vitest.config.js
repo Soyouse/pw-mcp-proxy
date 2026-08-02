@@ -27,7 +27,14 @@ export default defineConfig({
     globals: false,
     pool: 'forks',
     fileParallelism: false,
-    testTimeout: 30000,
+    // 🛑 DOIT DÉPASSER `READY_TIMEOUT_MS` (90 s, budget.js) + une marge — sinon un test ne peut
+    // JAMAIS observer le chemin qu'il est censé couvrir : vitest l'abat AVANT que le code n'ait
+    // rendu son verdict. Incohérence introduite le 02/08 en portant la readiness de 20 s à 90 s :
+    // 3 tests LIVE sont tombés à 30 s pile, en accusant le produit alors que c'était la config.
+    // ⚠️ UN TIMEOUT EST UNE BORNE, PAS UNE ATTENTE : il n'allonge AUCUN test qui passe, il ne
+    // touche que ce qui dépasse. Le monter ne coûte donc RIEN — et évite un rouge qui ment.
+    // ⚠️ Si `READY_TIMEOUT_MS` remonte un jour, CETTE valeur remonte avec (gate ci-dessous).
+    testTimeout: 150000,
     hookTimeout: 30000,
   },
 });

@@ -62,7 +62,7 @@ export class StdioTransport extends EventEmitter {
   async close() {
     const pid = this.child?.pid;
     if (this.child) {
-      try { this.child.kill(); } catch {}
+      try { this.child.kill(); } catch { /* SILENCE: le child est deja mort ; treeKill ci-dessous reste la vraie garantie */ }
       this.child = null;
     }
     // ⚠️ OBLIGATOIRE : tuer l'ARBRE (cf en-tete). child.kill() ne touche que le parent direct.
