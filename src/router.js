@@ -348,8 +348,10 @@ export class Router {
       });
     }
     try {
-      await this.manager.get(target); // spawn + handshake si lazy
-      this.manager.activeProfile = target;
+      // ⚠️ setActiveProfile, JAMAIS `get()` + affectation directe : la methode LIBERE aussi l'ancien
+      // profil (ferme son transport + retire le heartbeat). Sauter cette liberation = le backend
+      // quitte survit en zombie et respawn en boucle (incident 02/08, cf manager.setActiveProfile).
+      await this.manager.setActiveProfile(target);
       const label = this.manager.config.profiles[target].label || target;
       this._send({
         jsonrpc: '2.0',

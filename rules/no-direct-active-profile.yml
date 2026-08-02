@@ -1,0 +1,31 @@
+# RÈGLE — « la bascule de profil passe par UNE porte » (ast-grep, analyse AST réelle)
+#
+# Détecte toute AFFECTATION directe de `.activeProfile`. Elle ne juge PAS et n'exempte RIEN :
+# la politique (quel fichier a le droit de porter cet état) vit dans UN SEUL endroit —
+# tests/no-direct-active-profile-gate.test.js. Même séparation que no-undeclared-timing.yml :
+#   • ast-grep = DÉTECTION exacte  • le test = POLITIQUE
+#
+# POURQUOI (incident LIVE 2026-08-02 07:15) : router._handleSwitch faisait
+#   `await manager.get(t); manager.activeProfile = t;`
+# — la bascule SANS libérer l'ancien profil. Le backend quitté restait dans le pool avec son
+# transport HTTP vivant, alors que son serveur partagé venait d'être reapé « idle » (légitime :
+# plus aucun client). Ce transport tapait dans le vide => backend exited => « purge du cadavre
+# + respawn » => un serveur @playwright/mcp + son Chrome relancés toutes les ~15 s.
+# Le contrat vit désormais dans manager.setActiveProfile() (get PUIS libération du précédent).
+#
+# ⚠️ Le pattern porte le `=` : seules les ÉCRITURES matchent, jamais les LECTURES
+#    (`${manager.activeProfile}` dans un log reste légitime et invisible pour cette règle).
+# ⚠️ Les regex sont INTERDITES ici : `manager.activeProfile = x` est cité dans un COMMENTAIRE
+#    de manager.js — une regex crierait au loup. C'est exactement ce que l'AST évite.
+
+id: no-direct-active-profile
+language: JavaScript
+severity: error
+message: 'Affectation directe de activeProfile — passer par manager.setActiveProfile()'
+note: |
+  setActiveProfile() fait get(cible) PUIS libère le profil précédent (ferme son transport,
+  retire son heartbeat). Écrire la propriété à la main court-circuite cette libération et
+  réintroduit la boucle de spawn du 02/08/2026.
+  Voir tests/manager-switch-lifecycle.test.js (invariant N profils) + BACKLOG P0.
+rule:
+  pattern: $OBJ.activeProfile = $VALUE

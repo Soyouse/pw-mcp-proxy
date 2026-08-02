@@ -248,6 +248,43 @@ export class Manager {
     return new HttpTransport(url, { protocolVersion: this.clientInfo.protocolVersion, spec });
   }
 
+  // SEUL chemin de bascule de profil (router._handleSwitch l'appelle ; NE PAS re-ecrire
+  // `manager.activeProfile = x` ailleurs — ce serait sauter la liberation ci-dessous).
+  //
+  // ⚠️ LIBERER L'ANCIEN PROFIL EST OBLIGATOIRE — incident LIVE 2026-08-02 07:15 (boucle de spawn) :
+  // sans ca, le backend quitte RESTAIT dans le pool avec son transport HTTP VIVANT, alors que son
+  // serveur partage venait d'etre reape « idle » (legitime : plus aucun client). Ce transport tapait
+  // dans le vide => backend exited => « purge du cadavre + respawn » => un serveur @playwright/mcp
+  // (+ son Chrome) relance toutes les ~15 s jusqu'a saturer la machine.
+  //
+  // ⚠️ ORDRE OBLIGATOIRE : on n'ouvre le nouveau QU'APRES l'avoir obtenu (get d'abord). Liberer avant
+  // laisserait l'agent SANS AUCUN backend si le nouveau profil echoue a demarrer.
+  // ⚠️ MULTI-AGENT : liberer = fermer MA session (DELETE HTTP) + retirer MON heartbeat. Le serveur
+  // partage survit tant qu'un AUTRE agent le tient (ref-count) ; on ne tue JAMAIS le serveur ici.
+  // Scelle par tests/manager-switch-lifecycle.test.js (invariant N profils : au plus 1 transport ouvert).
+  async setActiveProfile(target) {
+    if (!this.config.profiles[target]) throw new Error(`profil inconnu: ${target}`);
+    const previous = this.activeProfile;
+    await this.get(target); // peut throw : on n'a alors RIEN libere, l'agent garde son backend courant
+    this.activeProfile = target;
+    if (previous && previous !== target) this._release(previous);
+    return target;
+  }
+
+  // Libere un profil dont CE proxy n'est plus client : ferme backend + transport et retire le
+  // heartbeat. Best-effort et idempotent — liberer ne doit jamais faire echouer une bascule reussie.
+  _release(profile) {
+    const b = this.backends.get(profile);
+    if (b) {
+      this.backends.delete(profile); // AVANT stop() : 'close' -> _onBackendUnresponsive ne doit rien retrouver
+      try { b.stop(); } catch (e) { log(`[backend:${profile}] liberation: ${describeError(e)}`); }
+    }
+    // http seulement : decremente le ref-count du serveur partage (no-op en stdio).
+    if (this._isHttp(profile)) {
+      try { this.supervisor?.unregisterClient(profile); } catch (e) { log(`[supervisor:${profile}] unregister: ${describeError(e)}`); }
+    }
+  }
+
   active() {
     return this.get(this.activeProfile);
   }
