@@ -86,6 +86,23 @@ function connecter(nomCanal, env) {
 }
 
 /**
+ * 🛑 SOURCE UNIQUE : « le pair a disparu avant de répondre » — LE MÊME FAIT, que le noyau le
+ * rapporte comme une fin de flux propre ou comme une coupure brutale.
+ *
+ * ⚠️ CE N'EST PAS UN AIGUILLAGE PAR OS, et il ne faut PAS en faire un. La doc Node ne garantit
+ * AUCUNE différence entre socket Unix et named pipe sur ces événements (vérifiée à la source le
+ * 03/08) : c'est la MANIÈRE DE MOURIR du pair qui varie, pas la plateforme. Un daemon qui sort
+ * pendant qu'on lui parle produit un EOF s'il ferme proprement, un RST s'il disparaît — et les
+ * deux veulent dire exactement « aucune réponse ne viendra de cette socket, en relancer un ».
+ * ⚠️ MESURÉ EN CI le 03/08 (ubuntu, VERT sur Windows) : traité comme une ERREUR FATALE, ce RST
+ * faisait échouer l'acquisition du profil au lieu de reboucler — l'agent n'obtenait JAMAIS son
+ * navigateur, pour une raison qu'il ne pouvait pas comprendre.
+ * ⚠️ NE JAMAIS y ajouter un code qui signifie autre chose (`EACCES`, `ENOENT`…) : ceux-là doivent
+ * remonter BRUYAMMENT. Cette liste ne couvre QUE la disparition du pair.
+ */
+const PAIR_DISPARU = new Set(['ECONNRESET', 'EPIPE', 'ECONNABORTED']);
+
+/**
  * @returns {Promise<{url:string,connexion:net.Socket}|null>} `null` = le daemon s'est fermé avant
  *          de répondre (il sortait) : à l'appelant de reboucler — ce n'est PAS une erreur du profil.
  */
@@ -102,7 +119,12 @@ function demander(sock, profile, spec, nomCanal) {
       // ⚠️ La socket reste OUVERTE et est rendue à l'appelant : elle EST le ref-count.
       resolve({ url: rep.url, connexion: sock });
     });
-    sock.on('error', (e) => reject(new Error(`daemon ${nomCanal} : ${describeError(e)}`)));
+    sock.on('error', (/** @type {NodeJS.ErrnoException} */ e) => {
+      // Le pair a disparu ⇒ MÊME verdict que `close` : on rebouclera, ce n'est pas l'échec du
+      // profil. Toute AUTRE erreur reste fatale et NOMMÉE (cf PAIR_DISPARU).
+      if (PAIR_DISPARU.has(e.code || '')) return coupe();
+      reject(new Error(`daemon ${nomCanal} : ${describeError(e)}`));
+    });
     writeMessage(sock, requeteAcquire(profile, spec));
   });
 }
