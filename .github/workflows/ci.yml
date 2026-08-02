@@ -8,10 +8,10 @@ name: CI
 on:
   push:
     branches: [master]
-    paths: ['src/**', 'tests/**', 'spec/**', 'package.json', 'package-lock.json', 'stryker.conf.json', '.github/workflows/ci.yml']
+    paths: ['src/**', 'tests/**', 'package.json', 'package-lock.json', 'stryker.conf.json', '.github/workflows/ci.yml']
   pull_request:
     branches: [master]
-    paths: ['src/**', 'tests/**', 'spec/**', 'package.json', 'package-lock.json', 'stryker.conf.json', '.github/workflows/ci.yml']
+    paths: ['src/**', 'tests/**', 'package.json', 'package-lock.json', 'stryker.conf.json', '.github/workflows/ci.yml']
 
 permissions:
   contents: read
@@ -52,24 +52,15 @@ jobs:
       - run: npm ci
       - run: npm run test:mut
 
-  # Gate VERIF FORMELLE du verrou fichier (TLA+/TLC) — ~5s, OS-agnostique => ubuntu seul.
-  # Prouve l'exclusion mutuelle du protocole de vol de verrou (spec/SupervisorLock.tla, config Fixed)
-  # ET verifie que le negative-check (config Buggy) trouve toujours la violation (spec non creuse).
-  spec:
-    name: Gate verif formelle (TLA+/TLC)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-      - name: Télécharger tla2tools.jar
-        run: curl -sL -o spec/tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-      - run: npm run test:spec
+  # 🛑 GATE TLA+/TLC SUPPRIME le 03/08/2026 — AVEC le verrou fichier qu'il prouvait.
+  # Il appelait `npm run test:spec` sur `spec/SupervisorLock.tla`, disparus a l'amputation du
+  # superviseur : le job echouait donc a CHAQUE push, en pur bruit rouge.
+  # ⚠️ LECON A NE PAS PERDRE : ce verrou etait FORMELLEMENT PROUVE **et n'aurait pas du exister**.
+  # Une preuve formelle valide le COMPORTEMENT d'un composant, jamais son DROIT D'EXISTER — et la
+  # rigueur qu'on y met le rend paradoxalement exempt de la question. Reposer `/stack-audit`.
+  # ⚠️ TLA+ redevient OBLIGATOIRE si une concurrence NON SERIALISEE reapparait. Ce n'est pas le cas
+  # aujourd'hui : le daemon est un point de serialisation unique (un process, un thread, une Map),
+  # donc il n'y a aucune race a prouver.
 
   # Gates couplage (jscpd cliquet + dependency-cruiser no-circular) — ~30s, par-push OK.
   coupling:

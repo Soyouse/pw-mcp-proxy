@@ -35,7 +35,17 @@ export function treeKill(pid) {
       // /T = arbre, /F = force. Idempotent : un PID deja mort renvoie juste une erreur ignoree.
       spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
     } else {
-      // Backends spawnes en `detached` => group leader (pgid = pid) : -pid tue tout le groupe.
+      // 🛑 CONTRAT D'APPEL SUR POSIX, NON NEGOCIABLE : `pid` DOIT etre un CHEF DE GROUPE, donc
+      // avoir ete spawne en `detached: true` (pgid === pid). C'est ce qui rend `kill(-pid)` EXACT.
+      // ⚠️ CE CONTRAT A DEJA ETE ROMPU UNE FOIS (mesure CI 03/08, ROUGE ubuntu+macOS, VERT Windows) :
+      // le daemon lancait le gardien SANS `detached`, herite du groupe du daemon. Alors :
+      //   - `kill(-pid)` ne designe aucun groupe ⇒ repli `kill(pid)` ⇒ SIGKILL au seul gardien ⇒
+      //     il ne peut pas intercepter ⇒ son nettoyage ne tourne pas ⇒ LE SERVEUR SURVIT, orphelin ;
+      //   - et surtout : l'espace des pgid EST celui des pid ⇒ si un groupe ETRANGER porte cet id,
+      //     on SIGKILL le process d'un TIERS. Action destructive derriere une inference = interdit.
+      // ⚠️ Le repli ci-dessous est un FILET pour le cas « deja mort », JAMAIS une excuse pour
+      // appeler treeKill sur un non-chef-de-groupe. Tout nouveau spawn dont le pid finira ici DOIT
+      // etre `detached` sur POSIX (cf server-daemon.js, stdio-transport.js).
       try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch { /* SILENCE: process deja disparu — c'est le RESULTAT VOULU, pas un echec */ } }
     }
   } catch {

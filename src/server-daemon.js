@@ -19,6 +19,7 @@
 // recharger, rien à synchroniser, aucune config à faire dériver.
 
 import net from 'node:net';
+import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { NdjsonReader, writeMessage } from './jsonrpc.js';
 import { daemonChannelName, channelIsFile } from './channel-name.js';
@@ -39,13 +40,26 @@ const CHILD_GUARD = path.join(path.dirname(fileURLToPath(import.meta.url)), 'chi
 const BIND_HOST = 'localhost'; // défaut documenté ; le client se connecte sur le MÊME hôte
 const URL_HOST = 'localhost'; // ⚠️ JAMAIS 127.0.0.1 : validation du Host header ⇒ 403
 
-export class ServerDaemon {
+/**
+ * 🛑 ÉVÉNEMENTS ÉMIS — OBSERVABILITÉ, jamais un canal de commande.
+ *   `'libere'` {profil, restants}  un client a lâché ce profil ; `restants` = ref-count APRÈS.
+ *
+ * ⚠️ RAISON D'ÊTRE (mesurée en CI le 03/08) : le daemon est la SEULE AUTORITÉ sur le ref-count.
+ * Un observateur qui attend la fermeture de sa PROPRE socket puis suppose que le daemon a
+ * décompté s'appuie sur un ORDRE QUE LA DOC NE GARANTIT PAS — « il n'existe pas de garantie
+ * d'ordre entre le `close` client et le `close` serveur » (doc Node `net`, vérifiée 03/08).
+ * Windows gagnait la course, POSIX la perdait : 3 tests ROUGES sur ubuntu+macOS, VERTS sur Windows.
+ * ⚠️ Attendre CET événement, jamais la fermeture de sa propre extrémité, et JAMAIS un délai.
+ * ⚠️ Ne JAMAIS transformer ces événements en ordres : le daemon décide seul de la vie des serveurs.
+ */
+export class ServerDaemon extends EventEmitter {
   /**
    * @param {{env?:object, spawnFn?:Function, tuer?:Function, allouerPort?:Function,
    *          attendre?:Function, budgetMs?:number, nomCanal?:string, onArret?:Function,
    *          limite?:number|string}} [options] injections des tests + parametres imposes par le lanceur
    */
   constructor(options = {}) {
+    super();
     this.env = options.env || {};
     this._spawn = options.spawnFn || spawn;
     this._tuer = options.tuer || treeKill;
@@ -181,9 +195,23 @@ export class ServerDaemon {
     // ⚠️ Le gardien est lance NU (chemin absolu de node, aucun shell) : a travers un shell, le
     // tuyau appartiendrait a `cmd.exe` et l'EOF n'atteindrait jamais le gardien. C'est LUI qui
     // resout le shell pour la vraie commande (via `spawn-cmd.js`, source unique).
+    // 🛑 `detached` SUR POSIX = LE GARDIEN DEVIENT CHEF DE SON GROUPE (pgid === pid). OBLIGATOIRE,
+    // et ce n'est PAS une optimisation : `treeKill` tue par GROUPE (`kill(-pid)`) sur POSIX.
+    // Sans ça (defaut mesure en CI le 03/08, ROUGE sur ubuntu ET macOS, VERT sur Windows) :
+    //   1. le gardien herite du groupe du DAEMON ⇒ `kill(-pidGardien)` ne designe aucun groupe ;
+    //   2. repli sur `kill(pidGardien)` ⇒ SIGKILL, que le gardien NE PEUT PAS intercepter ⇒ son
+    //      `partir()` ne tourne jamais ⇒ **le serveur @playwright/mcp SURVIT, orphelin**, port
+    //      toujours ouvert. C'est la fuite de navigateur que tout ce design existe pour interdire.
+    //   3. PIRE, latent : l'espace des pgid est celui des pid ⇒ si un groupe ETRANGER porte l'id du
+    //      gardien, `kill(-pid)` tue le process d'un TIERS. Action destructive sur une inference.
+    // Windows ne discrimine pas (`taskkill /T /F` tue l'arbre) : le defaut y restait invisible.
+    // ⚠️ `detached` NE CASSE PAS le lien de vie du gardien : il change le GROUPE, jamais les
+    // descripteurs — `stdio[0]='pipe'` reste notre tuyau, donc l'EOF arrive toujours (cf child-guard).
+    // ⚠️ NE PAS retirer, et NE PAS l'appliquer sur Windows (`detached` y ouvre une console).
     const child = this._spawn(process.execPath, [CHILD_GUARD, spec.command, ...rawArgs], {
       stdio: ['pipe', 'ignore', 'ignore'],
       windowsHide: true,
+      detached: process.platform !== 'win32',
     });
     child.on('error', (e) => log(`[daemon:${profil}] spawn: ${describeError(e)}`));
     const pid = child.pid;
@@ -226,6 +254,10 @@ export class ServerDaemon {
     const etat = this._profils.get(profil);
     if (!etat) return;
     etat.clients.delete(sock);
+    // ⚠️ ÉMIS AVANT toute décision, et dans TOUS les cas (dernier parti ou non) : c'est le FAIT
+    // « le daemon a décompté », seule vérité opposable sur le ref-count. Un observateur qui
+    // attendrait la fermeture de sa PROPRE socket parierait sur un ordre non contractuel.
+    this.emit('libere', { profil, restants: etat.clients.size });
     if (etat.clients.size > 0) return; // d'AUTRES agents s'en servent : on ne touche à rien
     this._profils.delete(profil);
     try { this._tuer(etat.pid); } catch (e) { log(`[daemon:${profil}] arrêt: ${describeError(e)}`); }

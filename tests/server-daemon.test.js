@@ -59,6 +59,20 @@ function client(nomCanal, profil) {
 
 const ferme = (sock) => new Promise((r) => { sock.on('close', r); sock.destroy(); });
 
+// 🛑 FERMER UNE SOCKET ET ATTENDRE QUE LE DAEMON L'AIT ACTÉ. Utiliser CECI, jamais `ferme` seul,
+// dès qu'on va observer l'état du daemon juste après.
+//
+// ⚠️ POURQUOI (défaut MESURÉ en CI le 03/08/2026 : 3 tests ROUGES sur ubuntu ET macOS, VERTS sur
+// Windows). `ferme` n'attend que le `'close'` de NOTRE extrémité — un objet DIFFÉRENT de la socket
+// serveur sur laquelle le daemon décompte. Or la doc Node est explicite : **il n'existe AUCUNE
+// garantie d'ordre entre le `close` client et le `close` serveur** (vérifiée à la source le 03/08),
+// et **aucune différence documentée entre socket Unix et named pipe** sur ces événements.
+// ⇒ Windows ne faisait pas « autrement » : il GAGNAIT la course. Le test pariait sur un hasard.
+// ⚠️ NE PAS « corriger » ça par un `setTimeout` ni par un test de plateforme : ce serait figer le
+// hasard. On attend le FAIT émis par la seule autorité du ref-count — le daemon lui-même.
+const fermeEtAttend = (d, sock) =>
+  Promise.all([new Promise((r) => d.once('libere', r)), ferme(sock)]);
+
 afterEach(() => {
   for (const s of socks.splice(0)) { try { s.destroy(); } catch {} }
   for (const d of daemons.splice(0)) { try { d.arreter(); } catch {} }
@@ -114,7 +128,7 @@ test('S5 : un client part, le serveur SURVIT pour les autres', async () => {
   await d.demarrer();
   const a = await client(d.nomCanal, 'vegeta');
   await client(d.nomCanal, 'vegeta');
-  await ferme(a.sock);
+  await fermeEtAttend(d, a.sock);
   expect(d._tues, 'le départ d un client ne tue RIEN tant qu un autre est là').toEqual([]);
   expect(d.etat()[0].clients).toBe(1);
 });
@@ -126,8 +140,8 @@ test('S6 : le DERNIER client parti => le serveur est arrêté IMMÉDIATEMENT', a
   const a = await client(d.nomCanal, 'vegeta');
   const b = await client(d.nomCanal, 'vegeta');
   const pid = d.etat()[0].pid;
-  await ferme(a.sock);
-  await ferme(b.sock);
+  await fermeEtAttend(d, a.sock);
+  await fermeEtAttend(d, b.sock);
   expect(d._tues, 'le serveur du profil est arrêté, sans attendre aucun délai').toEqual([pid]);
   expect(d.etat()).toEqual([]);
 });
@@ -139,8 +153,11 @@ test('un client TUÉ BRUTALEMENT est décompté quand même (le noyau ferme la s
   await d.demarrer();
   const a = await client(d.nomCanal, 'vegeta');
   const pid = d.etat()[0].pid;
+  // ⚠️ MÊME PIÈGE que `fermeEtAttend` : un `setTimeout(50)` ici PARIAIT sur la vitesse de la
+  // machine (et le pari se perd en CI chargée). On attend le FAIT émis par le daemon.
+  const acte = new Promise((r) => d.once('libere', r));
   a.sock.destroy(); // aucun message d'adieu, comme un kill -9
-  await new Promise((r) => setTimeout(r, 50));
+  await acte;
   expect(d._tues, 'le noyau a fermé la socket => refcount à 0 => serveur arrêté').toEqual([pid]);
 });
 

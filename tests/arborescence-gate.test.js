@@ -48,6 +48,23 @@ function existeQuelquePart(nom) {
   return RACINES_DE_RESOLUTION.some((d) => fs.existsSync(path.join(RACINE, d, nom)));
 }
 
+/**
+ * Fichier LÉGITIMEMENT absent d'un clone neuf : fourni par l'UTILISATEUR, avec un gabarit livré.
+ *
+ * ⚠️ RÈGLE, pas exception de complaisance : le fichier est accepté SEULEMENT si son `.example`
+ * EXISTE ET EST SUIVI PAR GIT. Un contributeur qui clone trouve donc toujours de quoi le créer —
+ * c'est ce qui distingue « à fournir » d'un vrai fantôme.
+ * ⚠️ TROUVÉ PAR LA CI le 03/08 : le gate rougissait sur `profiles.json` (gitignoré, absent d'un
+ * clone) alors que l'arbo a RAISON de le citer. Le gate avait raison sur le fond — il lui manquait
+ * de savoir distinguer les deux cas. NE PAS élargir en « tout fichier gitignoré est toléré » :
+ * ce serait rouvrir le trou pour n'importe quel fantôme qu'on aurait pensé à gitignorer.
+ */
+function fourniParUtilisateur(nom) {
+  const ex = nom.replace(/(\.[^.]+)$/, '.example$1');
+  return ex !== nom && SUIVIS_PAR_GIT.has(ex);
+}
+const SUIVIS_PAR_GIT = new Set(suivis('.'));
+
 test('GATE : tout fichier cité dans ARBORESCENCE.md existe encore (aucun MENSONGE)', () => {
   // ⚠️ DEUX FORMES DE CITATION, et la seconde a été un TROU BÉANT jusqu'au 02/08/2026.
   //   ① chemin PRÉFIXÉ   `src/foo.js`      — seule forme détectée à l'origine
@@ -64,7 +81,7 @@ test('GATE : tout fichier cité dans ARBORESCENCE.md existe encore (aucun MENSON
   const fantomes = [
     ...new Set([
       ...prefixes.filter((f) => !fs.existsSync(path.join(RACINE, f))),
-      ...nus.filter((f) => !existeQuelquePart(f)),
+      ...nus.filter((f) => !existeQuelquePart(f) && !fourniParUtilisateur(f)),
     ]),
   ];
   expect(fantomes, `Fichiers CITÉS mais DISPARUS (un agent va les chercher) :\n${fantomes.join('\n')}`).toEqual([]);
