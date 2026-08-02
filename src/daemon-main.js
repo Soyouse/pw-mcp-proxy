@@ -32,11 +32,17 @@ process.on('unhandledRejection', (e) => log('daemon unhandledRejection: ' + desc
 // canal que personne n'écoute. Une seule source, celle qui a besoin de s'y connecter.
 // Repli sur le calcul local uniquement si lancé à la main (diagnostic).
 const canalImpose = process.argv[2];
+// ⚠️ La limite est IMPOSÉE PAR LE LANCEUR (argv[3]), comme le nom du canal : lui seul a lu
+// `profiles.json`. Le daemon ne lit AUCUNE config — il n'aurait aucun moyen de rester synchrone.
+// ⚠️ CONSÉQUENCE À CONNAÎTRE : la limite est fixée au LANCEMENT du daemon. La changer dans
+// profiles.json ne prend effet qu'au prochain daemon (donc quand plus aucun agent n'en tient).
+const limiteImposee = process.argv[3];
 // ⚠️ `onArret` : le daemon s'arrete SEUL des qu'il n'a plus ni profil ni client. C'est ICI, et
 // nulle part ailleurs, qu'on en tire la sortie du process — la classe est instanciee telle quelle
 // par les tests, un `process.exit()` en son sein tuerait leur worker.
 const daemon = new ServerDaemon({
   ...(canalImpose ? { nomCanal: canalImpose } : {}),
+  limite: limiteImposee,
   onArret: () => process.exit(0),
 });
 

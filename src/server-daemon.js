@@ -22,7 +22,7 @@ import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { NdjsonReader, writeMessage } from './jsonrpc.js';
 import { daemonChannelName, channelIsFile } from './channel-name.js';
-import { validerRequete, reponseOk, reponseErreur } from './daemon-protocol.js';
+import { validerRequete, reponseOk, reponseErreur, lireLimite, placeDisponible } from './daemon-protocol.js';
 import { resolveShellSpawn } from './spawn-cmd.js';
 import { allocateEphemeralPort } from './port-alloc.js';
 import { attendreReady } from './readiness.js';
@@ -61,6 +61,12 @@ export class ServerDaemon {
     this._arrete = false;
     // ⚠️ Rappel du PROPRIETAIRE du process (daemon-main). La classe ne sort JAMAIS elle-meme.
     this.onArret = options.onArret || null;
+    // 🛑 LIMITE OPTIONNELLE (`maxBrowsers`), ABSENTE PAR DÉFAUT. Elle REFUSE un profil de plus ;
+    // elle n'ÉVINCE JAMAIS. Évincer tuerait le navigateur d'un agent EN PLEINE ACTION (chaque
+    // serveur vivant a, par construction, au moins un client qui le tient) — soit exactement la
+    // violation du scénario S5 qu'on protège partout ailleurs. Refuser est bruyant et sans dégât ;
+    // évincer serait silencieux et destructeur. ⚠️ NE JAMAIS transformer ceci en LRU.
+    this.limite = lireLimite(options.limite);
   }
 
   /**
@@ -130,6 +136,15 @@ export class ServerDaemon {
     if (existant) {
       this._inscrire(existant, sock, profil);
       return existant.url;
+    }
+    // ⚠️ Le contrôle porte sur la CRÉATION seulement : rejoindre un profil déjà servi est du
+    // partage, il ne coûte aucun navigateur de plus (et le refuser casserait le multi-agent).
+    if (!placeDisponible(this._profils.size, this.limite)) {
+      throw new Error(
+        `limite maxBrowsers=${this.limite} atteinte (${this._profils.size} profils servis) — profil ` +
+        `"${profil}" REFUSÉ. Aucun navigateur existant n'a été touché : relâchez un profil, ou ` +
+        `augmentez/retirez maxBrowsers dans profiles.json (absent = illimité).`
+      );
     }
     if (!this._enCours.has(profil)) {
       this._enCours.set(profil, this._demarrerServeur(profil, spec).finally(() => this._enCours.delete(profil)));

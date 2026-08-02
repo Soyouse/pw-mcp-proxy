@@ -14,6 +14,8 @@ import {
   reponseErreur,
   validerRequete,
   lireReponse,
+  lireLimite,
+  placeDisponible,
 } from '../src/daemon-protocol.js';
 
 const specValide = { command: 'npx', args: ['-y', '@playwright/mcp@0.0.78', '--port', '1234'] };
@@ -196,4 +198,42 @@ test('lireReponse : chaque refus NOMME sa cause', () => {
   expect(lireReponse([]).erreur).toMatch(/non-objet/);
   expect(lireReponse({ ok: true }).erreur).toMatch(/url absente/);
   expect(lireReponse({ ok: false }).erreur).toMatch(/sans succès ni motif/);
+});
+
+// ---------- maxBrowsers : un garde-fou CHOISI, jamais un défaut subi ----------
+// 🛑 La limite REFUSE, elle n'ÉVINCE PAS. Depuis le refcount du noyau, tout navigateur vivant est
+// TENU par un agent : en évincer un casserait S5 (« les autres continuent sans interruption »).
+
+test('ABSENTE par défaut = AUCUNE limite (la machine de l utilisateur décide, pas ce code)', () => {
+  expect(lireLimite(undefined)).toBe(null);
+  expect(lireLimite(null)).toBe(null);
+  expect(placeDisponible(999, lireLimite(undefined)), 'illimité veut dire ILLIMITÉ').toBe(true);
+});
+
+test('valeurs ABSURDES => illimité, jamais un blocage (fonction TOTALE, fails-open assumé)', () => {
+  for (const v of [0, -1, 2.5, '', 'beaucoup', NaN, Infinity, {}, [], true])
+    expect(lireLimite(v), `valeur rejetée: ${String(v)}`).toBe(null);
+});
+
+test('valeur VALIDE acceptée, y compris en chaîne (JSON permissif)', () => {
+  expect(lireLimite(3)).toBe(3);
+  expect(lireLimite('7')).toBe(7);
+});
+
+test('la limite borne la CRÉATION : le dernier slot est utilisable, pas un de plus', () => {
+  expect(placeDisponible(2, 3), 'il reste de la place').toBe(true);
+  expect(placeDisponible(3, 3), 'pile à la limite : REFUS').toBe(false);
+  expect(placeDisponible(4, 3), 'au-delà : REFUS').toBe(false);
+});
+
+test('property : sous la limite on passe TOUJOURS, à partir d elle on refuse TOUJOURS', () => {
+  fc.assert(
+    fc.property(fc.integer({ min: 1, max: 500 }), fc.integer({ min: 0, max: 500 }), (limite, n) => {
+      expect(placeDisponible(n, limite)).toBe(n < limite);
+    })
+  );
+});
+
+test('property : sans limite, AUCUN nombre de profils ne bloque (même 90 milliards)', () => {
+  fc.assert(fc.property(fc.integer({ min: 0, max: 9e9 }), (n) => placeDisponible(n, null) === true));
 });

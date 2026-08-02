@@ -240,7 +240,9 @@ export class Manager {
     // ⚠️ Le daemon GARANTIT le serveur (le demarre si besoin, le partage sinon) et rend une socket.
     // Cette socket EST le ref-count : on la GARDE ouverte, `_release` la fermera. La fermer ici
     // libererait le profil aussitot et tuerait le navigateur sous l'agent.
-    const { url, connexion } = await acquerirProfil(profile, spec, {});
+    // `maxBrowsers` (optionnel, absent = illimite) : garde-fou CHOISI par l'utilisateur, applique
+    // par le daemon au LANCEMENT. Il REFUSE un profil de plus, il n'evince jamais.
+    const { url, connexion } = await acquerirProfil(profile, spec, {}, { maxBrowsers: this.config.maxBrowsers });
     this._closeConnexion(profile); // une SEULE connexion par profil (re-acquisition apres purge)
     this._connexions.set(profile, connexion);
     return new HttpTransport(url, { protocolVersion: this.clientInfo.protocolVersion, spec });

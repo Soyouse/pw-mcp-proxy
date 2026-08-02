@@ -4,6 +4,7 @@
   "defaultProfile": "work",
   "backend": { "command": "npx", "args": ["-y", "@playwright/mcp@0.0.78"] },
   "caps": [],
+  "_comment_maxBrowsers": "OPTIONAL, ABSENT = UNLIMITED (recommended default). Max number of DISTINCT profiles served at the same time. Leave it out unless you have a reason: a running browser is one an agent is actively holding — the kernel refcount stops it the instant the last client lets go, so there are never idle browsers to reclaim. Set it only to cap a small machine. When the cap is reached a NEW profile is REFUSED with a named error; a running browser is NEVER evicted (evicting would kill work in progress). Joining an already-served profile is always allowed (sharing costs no extra browser). Read once when the daemon starts: changing it takes effect on the next daemon.",
   "ntfyUrl": "",
   "profiles": {
     "work": { "userDataDir": "/absolute/path/to/.pw-profiles/work", "label": "Work account" },

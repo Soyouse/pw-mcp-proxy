@@ -38,7 +38,7 @@ const MAX_ESSAIS = 3;
  * @returns {Promise<{url:string, connexion:net.Socket}>} ⚠️ NE PAS fermer `connexion` tant que le
  *          profil sert : c'est elle qui maintient le serveur en vie.
  */
-export async function acquerirProfil(profile, spec, env = {}) {
+export async function acquerirProfil(profile, spec, env = {}, options = {}) {
   const nomCanal = daemonChannelName(env);
 
   for (let essai = 1; essai <= MAX_ESSAIS; essai++) {
@@ -55,7 +55,7 @@ export async function acquerirProfil(profile, spec, env = {}) {
     }
 
     // Aucun daemon : en lancer un et ATTENDRE SON SIGNAL (jamais sonder en boucle).
-    const signal = await lancerDaemon(nomCanal);
+    const signal = await lancerDaemon(nomCanal, options.maxBrowsers);
     if (signal === 'echec') throw new Error(`daemon ${nomCanal} : lancement impossible`);
     // 'ready' ⇒ il écoute · 'busy' ⇒ un autre a gagné la course : dans les DEUX cas, un daemon
     // est joignable maintenant. On reboucle pour s'y connecter — c'est un fait, pas une attente.
@@ -111,12 +111,14 @@ function demander(sock, profile, spec, nomCanal) {
  * Lance le daemon et attend SON SIGNAL sur stdout — pas un délai.
  * @returns {Promise<'ready'|'busy'|'echec'>}
  */
-function lancerDaemon(nomCanal) {
+function lancerDaemon(nomCanal, maxBrowsers) {
   return new Promise((resolve) => {
     // ⚠️ `detached` : il doit SURVIVRE au proxy qui le lance (il porte les navigateurs des autres
     // agents). ⚠️ stdout en `pipe` UNIQUEMENT pour recevoir le signal : le daemon n'écrit qu'une
     // ligne puis se tait, donc aucun risque de pipe plein ni d'EPIPE quand ce proxy mourra.
-    const child = spawn(process.execPath, [DAEMON_MAIN, nomCanal], {
+    const args = [DAEMON_MAIN, nomCanal];
+    if (maxBrowsers != null) args.push(String(maxBrowsers));
+    const child = spawn(process.execPath, args, {
       stdio: ['ignore', 'pipe', 'ignore'],
       detached: true,
       windowsHide: true,

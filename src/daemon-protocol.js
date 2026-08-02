@@ -80,3 +80,33 @@ export function lireReponse(msg) {
   }
   return reponseErreur(msg.erreur ?? 'réponse sans succès ni motif');
 }
+
+/**
+ * Lit la limite OPTIONNELLE de navigateurs simultanés (`maxBrowsers` de profiles.json).
+ *
+ * 🛑 ABSENTE PAR DÉFAUT = AUCUNE LIMITE, et c'est le bon défaut : depuis le refcount du noyau, un
+ * navigateur vivant est un navigateur qu'un agent TIENT en ce moment. Leur nombre est donc du
+ * travail DEMANDÉ, jamais du gaspillage. Une machine costaude en supporte des centaines ; ce n'est
+ * pas à ce code d'en décider à sa place.
+ * ⚠️ Fonction TOTALE : toute valeur absurde (0, -1, "beaucoup", null, 2.5) rend `null` = pas de
+ * limite. Fails-OPEN ASSUMÉ ici, et c'est délibéré : une limite mal saisie ne doit pas priver
+ * l'utilisateur de son navigateur. La limite est un garde-fou qu'on CHOISIT, jamais un défaut subi.
+ * @returns {number|null} entier > 0, ou `null` pour « illimité »
+ */
+export function lireLimite(valeur) {
+  // ⚠️ BOOLÉENS REJETÉS EXPLICITEMENT : `Number(true) === 1`, donc un `"maxBrowsers": true` dans
+  // profiles.json donnerait une limite de UN SEUL navigateur — l'inverse exact de ce que
+  // l'utilisateur voulait dire, et un blocage total dès le 2e profil. Trouvé par le test.
+  if (typeof valeur === 'boolean') return null;
+  const n = typeof valeur === 'number' ? valeur : Number(valeur);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * Reste-t-il de la place pour un profil SUPPLÉMENTAIRE ?
+ * ⚠️ Ne concerne QUE la création d'un nouveau profil : rejoindre un profil déjà servi est toujours
+ * autorisé (c'est du PARTAGE, ça ne coûte aucun navigateur de plus).
+ */
+export function placeDisponible(nbProfilsActifs, limite) {
+  return limite === null || nbProfilsActifs < limite;
+}
