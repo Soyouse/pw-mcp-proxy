@@ -57,3 +57,6 @@
 - `tests/arborescence-gate.test.js` — gate de CE fichier, dans les deux sens : aucun fichier réel absent (TROU), aucun fichier cité disparu (MENSONGE).
 - `tests/fixtures/sous-test.js` — garde-fou `exigerSousTest` : une fixture REFUSE de démarrer hors harnais (code 3). Le ratchet ne voit que ce qui porte son marqueur ; une fixture lancée à la main survivrait indéfiniment.
 - `CONTRIBUTING.md` · `SECURITY.md` · `CHANGELOG.md` — finition open source (repo PUBLIC, MIT).
+- `tests/typecheck-gate.test.js` — gate : `npm run typecheck` (tsc --checkJs sur `src/`) à ZÉRO erreur. Le typage a trouvé 4 défauts latents que 323 tests verts ne voyaient pas (chemins rares). ⚠️ Le faire passer = RESSERRER le type, jamais `any` ni `@ts-ignore`.
+- `tsconfig.json` — VÉRIFICATION SEULE (zéro `.ts`, zéro build, zéro emit). `include:["src"]` : un glob en ligne de commande n'est PAS développé par npm sous Windows alors qu'il l'est sous Linux ⇒ le script divergerait selon l'OS.
+- `SECURITY.md` — modèle de menace explicite : même machine, même utilisateur, AUCUNE auth par design. Dit ce qui EST une faille (sortir de la machine, spawn non demandé, fuite d'une identité vers une autre) et ce qui n'en est pas.
