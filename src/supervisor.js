@@ -57,6 +57,8 @@ import { alert } from './notify.js';
 import { log } from './logger.js';
 import { describeError } from './error-detail.js';
 import { acquireLaunchChannel } from './launch-channel.js';
+// ⚠️ HORLOGE MONOTONE pour tout horodatage PERSISTE (jamais Date.now() : il saute — NTP/DST).
+import { monotonicNow, isStaleBoot, isWallClock } from './clock.js';
 
 // ⚠️ Host / DNS-rebinding : on suit la CONFIGURATION DOCUMENTÉE par Microsoft (skill playwright-mcp-api,
 // playwright.dev/mcp/configuration/options), sans rien rétro-ingénierer :
@@ -105,12 +107,45 @@ export class Supervisor {
   }
 
   // ---------- registre : lecture / ecriture atomique (write-rename) ----------
+  // ⚠️ Tout horodatage du registre est en MONOTONE (ms depuis le boot machine), jamais en heure
+  // murale : `Date.now()` saute (NTP/DST) et ferait soit massacrer tous les serveurs, soit ne
+  // plus jamais en nettoyer aucun — silencieusement, et seulement sur la longue duree.
   _read() {
+    let reg;
     try {
-      return JSON.parse(fs.readFileSync(this.registryPath, 'utf8')) || emptyRegistry();
+      reg = JSON.parse(fs.readFileSync(this.registryPath, 'utf8')) || emptyRegistry();
     } catch {
       return emptyRegistry(); // absent/corrompu : on repart d'un registre vide (self-heal)
     }
+    // ⚠️ REGISTRE D'AVANT LE DERNIER REBOOT ⇒ VIDE. Ce n'est PAS une inference : un horodatage
+    // superieur a l'uptime courant ne peut venir que d'un boot precedent, et AUCUN process ne
+    // survit a un redemarrage. Meme regle qui rattrape l'ancien format (heure murale ~1.7e12,
+    // toujours > un uptime plausible) : une seule detection, pas de migration a maintenir.
+    const stamps = [];
+    for (const e of Object.values(reg.servers || {})) {
+      if (e && typeof e === 'object') stamps.push(e.startedAt, e.spawnedAt, ...Object.values(e.clients || {}));
+    }
+    const now = monotonicNow();
+    // LEGACY (horodatages en heure murale) : les process peuvent etre VIVANTS. On CONVERTIT — les
+    // oublier laisserait des serveurs orphelins A VIE le jour de la mise a jour, en silence.
+    // Ils repartent avec une grace d'un TTL : au pire un serveur idle vit un cycle de plus.
+    if (stamps.some(isWallClock)) {
+      log('[supervisor] registre au format horaire (pre-2026-08-02) : converti en monotone');
+      for (const e of Object.values(reg.servers || {})) {
+        if (!e || typeof e !== 'object') continue;
+        if (isWallClock(e.startedAt)) e.startedAt = now;
+        if (isWallClock(e.spawnedAt)) e.spawnedAt = now;
+        for (const [c, t] of Object.entries(e.clients || {})) if (isWallClock(t)) e.clients[c] = now;
+      }
+      return reg;
+    }
+    // PRE-REBOOT : un horodatage > uptime ne peut venir que d'un boot precedent, et AUCUN process
+    // ne survit a un redemarrage. Vider est donc EXACT, pas prudent.
+    if (isStaleBoot(stamps, now)) {
+      log('[supervisor] registre anterieur au dernier demarrage : ignore (aucun process n a survecu)');
+      return emptyRegistry();
+    }
+    return reg;
   }
   _write(reg) {
     const tmp = this.registryPath + '.' + process.pid + '.tmp';
@@ -372,8 +407,8 @@ export class Supervisor {
       // 'ready'. ⚠️ NE PAS la re-creer ici avec withServer : ce serait un SECOND site de construction
       // d'entree (deux verites a maintenir en parallele = la duplication qui derive), et ca ecraserait
       // le spawnedAt d'origine — donc le seul horodatage qui date reellement le demarrage.
-      let out = promoteServer(this._read(), profile, Date.now());
-      out = withClient(out, profile, this.clientId, Date.now()); // je m'enregistre immediatement
+      let out = promoteServer(this._read(), profile, monotonicNow());
+      out = withClient(out, profile, this.clientId, monotonicNow()); // je m'enregistre immediatement
       this._write(out);
       // ⚠️ PUBLICATION APRES readiness PROUVEE, jamais avant : un suiveur qui recoit un port le
       // considere JOIGNABLE par construction. Publier un port « en cours » rendrait le suiveur
@@ -426,7 +461,7 @@ export class Supervisor {
     // ⚠️ IDENTITE CAPTUREE ICI, au plus pres du spawn : c'est le seul instant ou l'on SAIT que ce pid
     // est bien le notre. Toute lecture ulterieure sera comparee a celle-ci avant un kill.
     const identity = processIdentity(pid);
-    this._write(withServer(this._read(), profile, { port, pid, identity, startedAt: Date.now(), state: STATE_STARTING }));
+    this._write(withServer(this._read(), profile, { port, pid, identity, startedAt: monotonicNow(), state: STATE_STARTING }));
     if (await this._pollReady(port, budgetMs)) return pid;
     try { treeKill(pid); } catch {}
     // Tentative RATEE : on retire l'intention qu'on vient d'inscrire. Le pid vient d'etre tue ; laisser
@@ -448,7 +483,7 @@ export class Supervisor {
   async _touch(profile) {
     try {
       await this._withLock(async () => {
-        const reg = withClient(this._read(), profile, this.clientId, Date.now());
+        const reg = withClient(this._read(), profile, this.clientId, monotonicNow());
         this._write(reg);
       });
     } catch (e) {
@@ -480,7 +515,7 @@ export class Supervisor {
         const alive = pids.filter((p) => isPidAlive(p));
         // startStaleMs() = budget au-dela duquel une entree 'starting' jamais promue est morte-nee.
         // C'est CE parametre qui rend l'orphelin du 31/07 tuable AUTOMATIQUEMENT (0-human).
-        const { reap, kept } = reapDecision(reg, alive, Date.now(), this.ttl, startStaleMs());
+        const { reap, kept } = reapDecision(reg, alive, monotonicNow(), this.ttl, startStaleMs());
         const doute = []; // entrees dont l'identite n'a PAS pu etre lue : a CONSERVER
         for (const r of reap) {
           const verdict = this._killIfOurs(r.pid, (reg.servers || {})[r.profile]?.identity, `reap ${r.reason}`);

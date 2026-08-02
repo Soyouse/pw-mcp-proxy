@@ -20,6 +20,7 @@ export default defineConfig({
       'tests/error-detail.test.js',
       'tests/channel-name.test.js',
       'tests/proc-identity-pure.test.js',
+      'tests/clock.test.js',
     ],
     globals: false,
   },
