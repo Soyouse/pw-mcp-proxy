@@ -65,19 +65,8 @@ const BUDGET = {
       'process immédiate, donc le budget ne peut plus déclarer cassé un process qui a simplement ' +
       "démarré lentement. C'est le défaut mesuré le 02/08 (7 tests rouges, machine chargée).",
   },
-  'supervisor.js': {
-    max: 3,
-    motif: 'DETTE',
-    pourquoi:
-      '⛔ NON JUSTIFIÉ — questions 100 % LOCALES (le lanceur vit-il ? reste-t-il des clients ?). ' +
-      'Le noyau y répond par ÉVÉNEMENT. Cible : 0, via canal nommé (named pipe / socket Unix) + ' +
-      "événement de fin de processus. Cf skill §DÉCISION D'ARCHITECTURE.",
-    impact:
-      'Si ces délais décident FAUX : un serveur sain est déclaré cassé et TUÉ, ou un serveur mort ' +
-      'reste dans le registre. ⚠️ ATTÉNUÉ le 02/08 pour le poll de readiness (verdict à 3 états : ' +
-      'la mort du process est désormais un FAIT immédiat, le budget ne sert plus qu\'au cas ' +
-      '« vivant mais muet »). Les 3 autres restent des paris sur une machine chargée.',
-  },
+  // ⛔ `supervisor.js` RETIRÉ le 03/08 avec le fichier lui-même. Cible 0 ATTEINTE — pas par un
+  // réglage, par la SUPPRESSION du composant. La DETTE d'appels temporels est donc à ZÉRO.
 };
 
 // Constantes temporelles : tolérées UNIQUEMENT dans la source unique + le pur qui les REÇOIT.
@@ -167,20 +156,9 @@ const BUDGET_INFERENCE = {
     pourquoi:
       "borne de l'attente « vivant mais muet » — problème de l'arrêt, aucune observation ne tranche.",
   },
-  'supervisor.js': {
-    max: 3,
-    motif: 'DETTE',
-    pourquoi:
-      '⛔ NON JUSTIFIÉ — 3x péremption de verrou (LOCK_STALE_MS). Le poll de readiness est parti ' +
-      'dans readiness.js le 02/08 (cliquet 4 → 3, jamais remonté). Le canal ' +
-      'nommé rend le verrou périmé IMPOSSIBLE par construction (le noyau le détruit à la mort du ' +
-      'processus). Cible : 0. Cf skill §DÉCISION D\'ARCHITECTURE.',
-    impact:
-      'Si LOCK_STALE_MS décide FAUX : un verrou TENU est jugé périmé et VOLÉ ⇒ deux sections ' +
-      'critiques ⇒ double spawn ⇒ « browser is already in use ». C\'est la cascade du 31/07 (5 h). ' +
-      '⚠️ Toutes les trois se déclenchent d\'autant plus facilement que la machine est CHARGÉE — ' +
-      'exactement le moment où l\'on a le moins besoin d\'une panne supplémentaire.',
-  },
+  // ⛔ `supervisor.js` RETIRÉ le 03/08 avec le fichier. Le verrou à péremption (LOCK_STALE_MS),
+  // cause de la cascade de 5 h du 31/07, n'existe plus : le canal nommé rend le verrou périmé
+  // IMPOSSIBLE par construction. Cible 0 ATTEINTE par suppression, pas par réglage.
 };
 
 // ⚠️ Toute entrée en DETTE DOIT porter son IMPACT — ajouté le 02/08 après une leçon coûteuse.
@@ -274,11 +252,39 @@ test('les constantes temporelles restent dans la SOURCE UNIQUE (budget.js)', () 
   ).toEqual([]);
 });
 
-test('la DETTE reste visible et ne grossit pas (supervisor.js : cible = 0)', { timeout: 30000 }, () => {
-  const n = scanRule(RULE)['supervisor.js'] || 0;
-  expect(n, `supervisor.js : ${n} délais LOCAUX (cible 0). Ne jamais remonter.`).toBeLessThanOrEqual(
-    BUDGET['supervisor.js'].max
-  );
+// 🛑 UN BUDGET ACCORDÉ À UN FICHIER QUI N'EXISTE PLUS EST UN **PERMIS DORMANT**.
+//
+// ⚠️ DÉFAUT RÉEL TROUVÉ LE 03/08/2026, dans ce gate même. `supervisor.js` a été SUPPRIMÉ le 02/08,
+// mais ses deux entrées (`max: 3, motif: 'DETTE'`) sont restées dans les budgets. Conséquences,
+// toutes silencieuses :
+//   ① le test qui « surveillait » sa dette lisait `0 <= 3` ⇒ VERT ÉTERNEL, faux réconfort ;
+//   ② surtout : un `supervisor.js` recréé demain aurait hérité d'un droit à **3 délais locaux
+//      NON JUSTIFIÉS** sans que rien ne rougisse — exactement l'inférence qui a coûté 5 h le 31/07.
+// Un cliquet ne protège que ce qui existe ; il faut donc aussi vérifier que ce qu'il couvre EXISTE.
+// ⚠️ La bonne façon de faire passer ce gate est de RETIRER l'entrée, jamais de recréer le fichier.
+test('AUCUN budget ne survit à son fichier (pas de permis dormant)', () => {
+  const SRC = path.join(ROOT, 'src');
+  const fantomes = [];
+  for (const [nom, budget] of [['appels', BUDGET], ['inférence', BUDGET_INFERENCE]]) {
+    for (const f of Object.keys(budget)) {
+      if (!fs.existsSync(path.join(SRC, f))) fantomes.push(`${nom}/${f}`);
+    }
+  }
+  expect(
+    fantomes,
+    `Budget accordé à un fichier INEXISTANT : ${fantomes.join(', ')}\n` +
+      `→ RETIRER l'entrée. La laisser, c'est pré-autoriser des délais non justifiés dans un fichier ` +
+      `qui n'existe pas encore — et le cliquet ne rougira pas le jour où il reviendra.`
+  ).toEqual([]);
+});
+
+// NEGATIVE-CHECK : sans lui, le gate ci-dessus pourrait être vert parce qu'il ne vérifie rien.
+test('NEGATIVE-CHECK : un budget fantôme fabriqué EST détecté', () => {
+  const faux = { 'ce-fichier-n-existe-pas.js': { max: 1, motif: 'distant', pourquoi: 'leurre' } };
+  const vus = Object.keys(faux).filter((f) => !fs.existsSync(path.join(ROOT, 'src', f)));
+  expect(vus, 'le détecteur doit voir un budget sans fichier').toEqual(['ce-fichier-n-existe-pas.js']);
+  // ET l'inverse : un fichier RÉEL ne doit jamais être signalé (sinon le gate crierait toujours).
+  expect(fs.existsSync(path.join(ROOT, 'src', 'backend.js')), 'témoin : backend.js existe').toBe(true);
 });
 
 // ⚠️ NEGATIVE-CHECK OBLIGATOIRE (anti-gate-creux) : la règle du volet 2 est neuve — prouver

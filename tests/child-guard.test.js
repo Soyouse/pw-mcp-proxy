@@ -11,7 +11,8 @@
 
 import { test, expect } from 'vitest';
 import path from 'node:path';
-import { readFileSync } from 'node:fs';
+import os from 'node:os';
+import { readFileSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { spawnTracked } from './harness.js'; // ⚠️ SEUL moyen de spawner (marqueur + ratchet)
 import { isPidAlive, listProcesses } from '../src/prockill.js';
@@ -104,3 +105,39 @@ test('GATE : le gardien ne transmet AUCUN descripteur à son enfant', () => {
   expect(spawnEnfant, "stdio:'ignore' OBLIGATOIRE — 'inherit'/'pipe' feraient hériter le tuyau de vie")
     .toMatch(/stdio:\s*'ignore'/);
 });
+
+// ⚠️ ANTI-RÉGRESSION D'OBSERVABILITÉ (posé le 03/08/2026, après audit du système de log).
+//
+// 🛑 LE GARDIEN ÉTAIT TOTALEMENT MUET. Il tuait un serveur — l'action de sécurité la plus
+// importante du design — sans laisser la moindre trace, NULLE PART. Et personne ne pouvait la
+// laisser à sa place : le daemon qui aurait pu la journaliser est justement celui qui vient de
+// mourir. Symptôme utilisateur possible : « mon navigateur s'est fermé tout seul », indiagnosticable.
+//
+// ⚠️ CE TEST VÉRIFIE LE FICHIER, PAS stderr — et ce n'est pas un détail : le daemon lance le
+// gardien en `stdio[1,2]='ignore'`, donc tout `stderr.write` part au néant. Écrire dans le fichier
+// est la SEULE façon pour lui de laisser une trace. Un test sur stderr passerait au vert tout en
+// prouvant l'inverse de ce qui compte.
+// ⚠️ `PW_MCP_LOG` INJECTÉ vers un fichier jetable : ne JAMAIS écrire dans le log de PROD depuis un
+// test (il est partagé avec les proxys réels de l'utilisateur, et la rotation est multi-écrivains).
+test('OBSERVABILITÉ : le gardien ÉCRIT pourquoi il a tué (sinon l incident est muet)', async () => {
+  const marqueur = `guardlog${process.pid}`;
+  const journal = path.join(os.tmpdir(), `pw-mcp-test-${marqueur}.log`);
+  const g = spawnTracked([GUARD, process.execPath, '-e', `/*${marqueur}*/setInterval(()=>{},1000)`], {
+    stdio: ['pipe', 'ignore', 'ignore'],
+    env: { ...process.env, PW_MCP_LOG: journal },
+  });
+
+  expect(await jusqua(async () => enfantDe(marqueur).length > 0), 'préalable : l enfant tourne').toBe(true);
+  g.stdin.destroy(); // = ce que fait le noyau à la mort du daemon
+  expect(await jusqua(async () => enfantDe(marqueur).length === 0), 'préalable : l enfant est tué').toBe(true);
+
+  const lu = () => { try { return readFileSync(journal, 'utf8'); } catch { return ''; } };
+  expect(await jusqua(async () => /\[gardien\]/.test(lu())), 'le gardien DOIT écrire une ligne').toBe(true);
+
+  const trace = lu();
+  // La trace doit dire POURQUOI — un « [gardien] quelque chose » ne vaudrait rien en incident.
+  expect(trace, 'la trace doit NOMMER la cause (mort du parent)').toMatch(/parent/i);
+  expect(trace, 'la trace doit porter le pid du serveur arrêté').toMatch(/pid=\d+/);
+
+  try { unlinkSync(journal); } catch { /* nettoyage best-effort */ }
+}, 40000);
