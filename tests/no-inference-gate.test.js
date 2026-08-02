@@ -55,6 +55,11 @@ const BUDGET = {
       '⛔ NON JUSTIFIÉ — questions 100 % LOCALES (le lanceur vit-il ? le serveur est-il prêt ? ' +
       'reste-t-il des clients ?). Le noyau y répond par ÉVÉNEMENT. Cible : 0, via canal nommé ' +
       "(named pipe / socket Unix) + événement de fin de processus. Cf skill §DÉCISION D'ARCHITECTURE.",
+    impact:
+      'Si ces délais décident FAUX : un serveur sain est déclaré cassé et TUÉ, ou un serveur mort ' +
+      'reste dans le registre. ⚠️ ATTÉNUÉ le 02/08 pour le poll de readiness (verdict à 3 états : ' +
+      'la mort du process est désormais un FAIT immédiat, le budget ne sert plus qu\'au cas ' +
+      '« vivant mais muet »). Les 3 autres restent des paris sur une machine chargée.',
   },
 };
 
@@ -138,6 +143,11 @@ const BUDGET_INFERENCE = {
     pourquoi:
       "⛔ NON JUSTIFIÉ — « ce client bat-il encore ? » est 100 % LOCAL : la fermeture de sa " +
       'connexion au canal nommé est un ÉVÉNEMENT exact du noyau. Cible : 0 (refcount).',
+    impact:
+      'Si `now - lastSeen > ttl` décide FAUX : un agent VIVANT est jugé parti ⇒ son serveur est ' +
+      'reapé SOUS LUI ⇒ son navigateur disparaît en pleine action (scénario S5 violé). Le sens ' +
+      'inverse fuit un navigateur. ⚠️ Un agent lent à battre (machine chargée) est indistinguable ' +
+      "d'un agent mort — même faute que le poll de readiness, sur un autre horodatage.",
   },
   'supervisor.js': {
     max: 4,
@@ -146,8 +156,36 @@ const BUDGET_INFERENCE = {
       '⛔ NON JUSTIFIÉ — 3x péremption de verrou (LOCK_STALE_MS) + 1x poll de readiness. Le canal ' +
       'nommé rend le verrou périmé IMPOSSIBLE par construction (le noyau le détruit à la mort du ' +
       'processus). Cible : 0. Cf skill §DÉCISION D\'ARCHITECTURE.',
+    impact:
+      'Si LOCK_STALE_MS décide FAUX : un verrou TENU est jugé périmé et VOLÉ ⇒ deux sections ' +
+      'critiques ⇒ double spawn ⇒ « browser is already in use ». C\'est la cascade du 31/07 (5 h). ' +
+      '⚠️ Toutes les trois se déclenchent d\'autant plus facilement que la machine est CHARGÉE — ' +
+      'exactement le moment où l\'on a le moins besoin d\'une panne supplémentaire.',
   },
 };
+
+// ⚠️ Toute entrée en DETTE DOIT porter son IMPACT — ajouté le 02/08 après une leçon coûteuse.
+// Les deux lignes de `_pollReady` qui transformaient une machine lente en PANNE étaient DÉJÀ
+// comptées par ce gate. Il disait « 4 en dette, cible 0 » ; il ne disait pas qu'une de ces 4
+// déclarait cassé un serveur parfaitement sain. J'ai lu un COMPTEUR, pas un RISQUE.
+// Un budget mesure la QUANTITÉ d'inférence ; sans `impact`, il n'en mesure jamais la GRAVITÉ.
+// Écrire la conséquence FORCE à se demander « et si ça décide faux ? » — au moment où on ajoute
+// la dette, pas trois semaines plus tard en pleine panne.
+test('CHAQUE dette déclare son IMPACT (le compteur ne dit pas la gravité)', () => {
+  const sansImpact = [];
+  for (const [nom, budget] of [['appels', BUDGET], ['inférence', BUDGET_INFERENCE]]) {
+    for (const [f, b] of Object.entries(budget)) {
+      if (b.motif !== 'DETTE') continue;
+      if (typeof b.impact !== 'string' || b.impact.trim().length < 40) sansImpact.push(`${nom}/${f}`);
+    }
+  }
+  expect(
+    sansImpact,
+    `Dette SANS impact déclaré : ${sansImpact.join(', ')}\n` +
+      `→ Écrire ce qui se passe quand cette inférence décide FAUX. Un compteur seul ne hiérarchise ` +
+      `rien : on relit « 4 en dette » sans voir que l'une d'elles casse sous charge (vécu le 02/08).`
+  ).toEqual([]);
+});
 
 function scanInference() {
   return scanRule(path.join(ROOT, 'rules', 'no-temporal-inference.yml'));
