@@ -48,6 +48,9 @@ import {
   RETRY_READY_TIMEOUT_MS,
   startStaleMs,
 } from './budget.js';
+// ⚠️ SOURCE UNIQUE de la readiness (extraite le 02/08, partagée avec le daemon). NE PAS
+// réimplémenter de sonde ni de boucle d'attente ici : deux versions divergeraient.
+import { sonder, attendreReady } from './readiness.js';
 import { allocateEphemeralPort } from './port-alloc.js';
 import { treeKill, isPidAlive, sweepByCmd } from './prockill.js';
 import { processIdentity } from './proc-identity.js';
@@ -326,23 +329,12 @@ export class Supervisor {
   }
   // Le serveur ecoute-t-il ? Toute reponse HTTP (meme 4xx) prouve qu'il est up. ECONNREFUSED = pas pret.
   // ⚠️ Pas de health endpoint documente cote @playwright/mcp (verifie en ligne) => on sonde /mcp.
+  // ⚠️ DELEGATION a readiness.js — SOURCE UNIQUE (extraite le 02/08). L'implementation vivait ici
+  // en double avec celle qu'allait recevoir le daemon : deux logiques de readiness, c'est la
+  // garantie d'en corriger une seule et de ne voir le bug que sur un des deux chemins.
+  // NE PAS reintroduire de sonde locale ; le `2000` en dur est parti dans budget.js (PROBE_TIMEOUT_MS).
   async _probeReady(port) {
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 2000);
-    try {
-      const res = await fetch(this.urlFor(port), {
-        method: 'GET',
-        headers: { accept: 'text/event-stream' },
-        signal: ac.signal,
-      });
-      // draine/ferme le flux eventuel (evite un socket qui pend).
-      try { await res.body?.cancel(); } catch {}
-      return true; // a repondu quelque chose => up
-    } catch {
-      return false; // refus de connexion / timeout => pas (encore) pret
-    } finally {
-      clearTimeout(t);
-    }
+    return sonder(port, URL_HOST);
   }
   /**
    * Attend qu'un serveur devienne joignable. Rend `'pret'`, `'mort'` ou `'muet'`.
@@ -366,15 +358,7 @@ export class Supervisor {
    * panne, et son message accuse alors le reseau (« suspecter un filtrage local ») a tort.
    */
   async _pollReady(port, budget = this.readyTimeoutMs, pid = null) {
-    const t0 = Date.now();
-    while (Date.now() - t0 < budget) {
-      if (await this._probeReady(port)) return 'pret';
-      // FAIT EXACT : le noyau dit que le process n'existe plus. Continuer a sonder un mort serait
-      // une inference pure — et ferait attendre le budget entier pour rien.
-      if (pid != null && !isPidAlive(pid)) return 'mort';
-      await this._delay(READY_POLL_MS);
-    }
-    return 'muet'; // vivant mais silencieux : le seul cas reellement indecidable
+    return attendreReady(port, { budgetMs: budget, pid, host: URL_HOST, delai: (ms) => this._delay(ms) });
   }
 
   // ---------- coeur : garantir un serveur pour un profil ----------

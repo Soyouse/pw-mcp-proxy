@@ -48,13 +48,30 @@ const BUDGET = {
     motif: 'distant',
     pourquoi: 'I/O réseau : le pair est hors de portée du noyau local, aucune autorité à interroger.',
   },
+  // ⚠️ CLIQUET DESCENDU 4 → 3 le 02/08 : la readiness est partie dans readiness.js (source unique
+  // partagée avec le daemon). Ne JAMAIS le remonter — un budget ne se relâche pas parce qu'on
+  // réorganise le code.
+  'readiness.js': {
+    max: 2,
+    motif: 'indécidable',
+    pourquoi:
+      "budget d'UNE sonde HTTP + pause entre deux sondes. La question « ce serveur écoutera-t-il ? » " +
+      "est le problème de l'arrêt : aucune observation ne tranche. ⚠️ Mais les DEUX autres issues, " +
+      'elles, sont des FAITS SANS délai (port qui répond ⇒ prêt · process disparu ⇒ mort) — le ' +
+      'budget ne sert QUE au cas « vivant mais muet ». Modèle systemd Type=notify.',
+    impact:
+      "Si le budget expire sur un serveur SAIN mais lent : verdict 'muet' ⇒ le serveur est tué et " +
+      'respawné pour rien. ⚠️ ATTÉNUÉ par construction : le verdict à 3 états rend la mort du ' +
+      'process immédiate, donc le budget ne peut plus déclarer cassé un process qui a simplement ' +
+      "démarré lentement. C'est le défaut mesuré le 02/08 (7 tests rouges, machine chargée).",
+  },
   'supervisor.js': {
-    max: 4,
+    max: 3,
     motif: 'DETTE',
     pourquoi:
-      '⛔ NON JUSTIFIÉ — questions 100 % LOCALES (le lanceur vit-il ? le serveur est-il prêt ? ' +
-      'reste-t-il des clients ?). Le noyau y répond par ÉVÉNEMENT. Cible : 0, via canal nommé ' +
-      "(named pipe / socket Unix) + événement de fin de processus. Cf skill §DÉCISION D'ARCHITECTURE.",
+      '⛔ NON JUSTIFIÉ — questions 100 % LOCALES (le lanceur vit-il ? reste-t-il des clients ?). ' +
+      'Le noyau y répond par ÉVÉNEMENT. Cible : 0, via canal nommé (named pipe / socket Unix) + ' +
+      "événement de fin de processus. Cf skill §DÉCISION D'ARCHITECTURE.",
     impact:
       'Si ces délais décident FAUX : un serveur sain est déclaré cassé et TUÉ, ou un serveur mort ' +
       'reste dans le registre. ⚠️ ATTÉNUÉ le 02/08 pour le poll de readiness (verdict à 3 états : ' +
@@ -149,11 +166,20 @@ const BUDGET_INFERENCE = {
       'inverse fuit un navigateur. ⚠️ Un agent lent à battre (machine chargée) est indistinguable ' +
       "d'un agent mort — même faute que le poll de readiness, sur un autre horodatage.",
   },
+  // ⚠️ 1 comparaison : la borne de boucle de `attendreReady`. Le budget n'y est qu'un FILET —
+  // les deux issues utiles (port qui répond / process mort) sont des faits SANS délai.
+  'readiness.js': {
+    max: 1,
+    motif: 'indécidable',
+    pourquoi:
+      "borne de l'attente « vivant mais muet » — problème de l'arrêt, aucune observation ne tranche.",
+  },
   'supervisor.js': {
-    max: 4,
+    max: 3,
     motif: 'DETTE',
     pourquoi:
-      '⛔ NON JUSTIFIÉ — 3x péremption de verrou (LOCK_STALE_MS) + 1x poll de readiness. Le canal ' +
+      '⛔ NON JUSTIFIÉ — 3x péremption de verrou (LOCK_STALE_MS). Le poll de readiness est parti ' +
+      'dans readiness.js le 02/08 (cliquet 4 → 3, jamais remonté). Le canal ' +
       'nommé rend le verrou périmé IMPOSSIBLE par construction (le noyau le détruit à la mort du ' +
       'processus). Cible : 0. Cf skill §DÉCISION D\'ARCHITECTURE.',
     impact:

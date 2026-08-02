@@ -93,6 +93,11 @@ export const READY_TIMEOUT_MS = 20000; // budget d'attente qu'un serveur NEUF re
 // encore laisser un demarrage a froid aboutir. 10 s = large pour un boot chaud, suffisant a froid.
 export const RETRY_READY_TIMEOUT_MS = 10000;
 export const READY_POLL_MS = 200; // periode de sondage pendant cette attente
+// Budget d'UNE sonde HTTP (pas de l'attente entiere). Etait en DUR (`2000`) dans supervisor.js —
+// remonte ici le 02/08 : budget.js est la SOURCE UNIQUE, un delai en dur ailleurs derive en silence.
+// ⚠️ C'est le temps accorde a UNE requete sur la loopback ; l'attente globale, elle, est bornee par
+// READY_TIMEOUT_MS et surtout interrompue par un FAIT (process mort) — cf readiness.js.
+export const PROBE_TIMEOUT_MS = 2000;
 export const LOCK_STALE_MS = 60000; // verrou plus vieux que ca = vole (proxy mort en le tenant)
 export const LOCK_WAIT_MS = 30000; // patience max a l'acquisition du verrou de registre
 export const LOCK_RETRY_MS = 50; // periode de spin sur le verrou
