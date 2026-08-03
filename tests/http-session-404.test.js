@@ -140,4 +140,8 @@ test('NEGATIVE-CHECK : un 404 qui PERSISTE après un handshake neuf est une VRAI
 
   await t.close();
   await s.close();
-});
+  // ⚠️ 20 s, et ce n'est PAS du confort : ce test ATTEND une réponse qui ne viendra jamais (c'est
+  // son objet), donc il consomme le budget entier d'`echange`. Le défaut vitest est 5 s — calé sur
+  // des tests EN MÉMOIRE — et il faisait ROUGIR ce test pour la seule raison qu'il fait son travail.
+  // ⚠️ Un timeout est une BORNE, pas une attente : il n'allonge AUCUN autre test.
+}, 20000);

@@ -210,9 +210,20 @@ export class HttpTransport extends EventEmitter {
       if (res.status === 405) { res.stream.resume(); return; } // serveur sans flux GET : legitime, on s'en passe
       if (res.status === 404) {
         // MEME evenement normal que sur le POST (cf `send`). ⚠️ Ici on ne « reprend » rien : on
-        // reboucle simplement, et le prochain tour ouvrira le GET avec la session toute neuve.
+        // reboucle, et le prochain tour ouvrira le GET avec la session toute neuve.
         res.stream.resume();
-        if (!(await this._rouvrirSession())) { this._fail('session expiree (404 GET) et reouverture impossible'); return; }
+        const ok = await this._rouvrirSession();
+        // 🛑 TEMPORISER, MEME EN CAS DE SUCCES — sans ca c'est une BOUCLE CHAUDE (defaut trouve par
+        // simulation adversariale le 03/08, avant tout incident). Cette boucle est SANS BORNE par
+        // decision (la borner declenche une boucle de spawn Chrome, rollback du 02/08). Donc si le
+        // serveur 404 le GET de facon PERSISTANTE — session neuve ou pas — on rejouerait le
+        // handshake en continu : 2 POST par tour, sans la moindre pause, a pleine vitesse CPU.
+        // ⚠️ Le `_fail` ci-dessous ne protege PAS de ca : il ne se declenche que si la reouverture
+        // ECHOUE. Le cas vicieux est « reouverture REUSSIE + GET qui 404 quand meme » — tout va
+        // bien de chaque cote, et la machine chauffe. Le delai est ce qui rend ce cas benin.
+        if (this._closed) return;
+        await this._delay(GET_REOPEN_MS);
+        if (!ok) { this._fail('session expiree (404 GET) et reouverture impossible'); return; }
         continue;
       }
       if (res.status < 200 || res.status >= 300 || !(res.headers['content-type'] || '').includes('text/event-stream')) {
