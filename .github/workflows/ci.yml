@@ -8,10 +8,10 @@ name: CI
 on:
   push:
     branches: [master]
-    paths: ['src/**', 'tests/**', 'package.json', 'package-lock.json', 'stryker.conf.json', '.github/workflows/ci.yml']
+    paths: ['src/**', 'tests/**', 'package.json', 'package-lock.json', 'stryker.conf.json', 'ARBORESCENCE.md', '.github/workflows/ci.yml']
   pull_request:
     branches: [master]
-    paths: ['src/**', 'tests/**', 'package.json', 'package-lock.json', 'stryker.conf.json', '.github/workflows/ci.yml']
+    paths: ['src/**', 'tests/**', 'package.json', 'package-lock.json', 'stryker.conf.json', 'ARBORESCENCE.md', '.github/workflows/ci.yml']
 
 permissions:
   contents: read
