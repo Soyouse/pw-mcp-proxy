@@ -18,8 +18,10 @@ import { withDeadline } from './deadline.js';
 import { clientBudgetMs, handshakeBudgetMs } from './budget.js';
 // ⚠️ describeError : JAMAIS `e.message` seul (il peut etre VIDE — incident 01/08).
 import { describeError } from './error-detail.js';
+// ⚠️ SOURCE UNIQUE du repli de version MCP (3 copies avant l'audit du 03/08).
+import { PROTOCOL_FALLBACK } from './protocol.js';
 
-const PROTOCOL_FALLBACK = '2025-06-18';
+
 
 export class Router {
   // options.handshakeBudgetMs = borne d'attente du backend pour initialize/tools/list (INJECTABLE pour

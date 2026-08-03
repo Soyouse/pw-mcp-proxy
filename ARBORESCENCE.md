@@ -24,6 +24,7 @@
 - `src/spawn-cmd.js` — **PUR** : `resolveShellSpawn` (résolution spawn cross-OS : `shell:true`+quoting pour commande bare `npx` sur Windows, sinon `shell:false`). **Source UNIQUE** partagée par `stdio-transport.js` + `child-guard.js` (anti-duplication : une copie qui dérive = un spawn qui casse d'un seul côté).
 - `src/router.js` — cœur intercept/passthrough + mapping ids. Interceptions : `initialize`, `tools/list`, `ping`, `tools/call {switch_profile,current_profile,restart_profile}`. Garde collision câblée ici. **HANDSHAKE BORNÉ** (incident 31/07) : `initialize` ET `tools/list` passent par `withDeadline(_handshakeBudgetMs)` — hors budget ⇒ réponse DÉGRADÉE (la session SURVIT) + `_refreshWhenReady` qui émet `tools/list_changed` dès que le backend répond. `_ourTools()` = site UNIQUE des 3 tools maison (nominal ET dégradé). Budget injectable `options.handshakeBudgetMs` (défaut = dérivé de `budget.js`).
 - `src/collision.js` — **PUR** : garde anti-collision. Source UNIQUE des 3 noms maison. `detectCollisions`/`canonicalInjectedName`/`exposedName`/`isOurToolCall`.
+- `src/protocol.js` — **PUR** : SOURCE UNIQUE de `PROTOCOL_FALLBACK` (version MCP de repli). Existait en 3 copies avant l audit du 03/08.
 - `src/prockill.js` — **I/O** : `treeKill` + `sweepByCmd` + `isPidAlive` + `listProcesses`. `src/prockill-pure.js` — **PUR** : `selectVictims` + `normPath`.
 - `src/spec.js` — **PUR** : `buildSpec` (args backend : caps, `--isolated` XOR `--user-data-dir`, override, args libres — ordre stable). ⚠️ jamais `--host`/`--port` (runtime, ajoutés par le superviseur).
 - `src/notify.js` — alerte best-effort (log + NTFY, config-first, zéro topic hardcodé). `src/jsonrpc.js` — framing ndjson.
@@ -53,6 +54,7 @@
 - `tests/child-guard.test.js` — contrat du gardien : EOF ⇒ l'enfant meurt · symétrie · commande inlançable · **deux gardiens = tuyaux indépendants** (anti-fuite de descripteur) · gate `stdio:'ignore'`.
 - `tests/contract-snapshot.test.js` — drift-test des surfaces TIERCES (`contracts/playwright-mcp.json`) : un flag requis qui disparaît devient ROUGE au bump, jamais une panne en prod.
 - `tests/no-direct-active-profile-gate.test.js` — gate : `activeProfile` ne s'écrit QUE par `setActiveProfile` (sinon on saute la libération = boucle de spawn du 02/08).
+- `tests/no-hardcoded-constant-gate.test.js` — gate « une verite partagee n existe qu UNE fois » : aucun delai en litteral hors `budget.js`, aucune version de protocole hors `protocol.js`, + negative-check rejouant les violations reelles du 03/08.
 - `tests/no-silent-catch-gate.test.js` — gate « LE SILENCE SE DÉCLARE » : aucun `catch {}` sans raison lisible, + double negative-check.
 - `tests/arborescence-gate.test.js` — gate de CE fichier, dans les deux sens : aucun fichier réel absent (TROU), aucun fichier cité disparu (MENSONGE).
 - `tests/fixtures/sous-test.js` — garde-fou `exigerSousTest` : une fixture REFUSE de démarrer hors harnais (code 3). Le ratchet ne voit que ce qui porte son marqueur ; une fixture lancée à la main survivrait indéfiniment.

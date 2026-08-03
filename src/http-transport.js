@@ -28,12 +28,16 @@ import { EventEmitter } from 'node:events';
 import { sseFeed } from './sse-parse.js';
 import { log } from './logger.js';
 import { describeError } from './error-detail.js';
+// ⚠️ SOURCE UNIQUE des delais (budget.js) — NE JAMAIS ecrire une duree en dur ici (`_delay(500)`),
+// meme « evidente » : sous cette forme elle echappe au gate temporel et sort de la source unique.
+import { GET_RETRY_MS, GET_REOPEN_MS } from './budget.js';
+import { PROTOCOL_FALLBACK } from './protocol.js';
 
 const SESSION_HEADER = 'mcp-session-id';
 const PROTOCOL_HEADER = 'mcp-protocol-version';
 
 export class HttpTransport extends EventEmitter {
-  constructor(url, { protocolVersion = '2025-06-18', spec = null } = {}) {
+  constructor(url, { protocolVersion = PROTOCOL_FALLBACK, spec = null } = {}) {
     super();
     this.url = url;
     this._u = new URL(url); // parse une fois (hostname/port/path stables)
@@ -165,7 +169,7 @@ export class HttpTransport extends EventEmitter {
         res = await this._req('GET', this._headers({ accept: 'text/event-stream' }), undefined, this._getAbort.signal);
       } catch {
         if (this._closed) return;
-        await this._delay(500);
+        await this._delay(GET_RETRY_MS);
         continue;
       }
       if (res.status === 405) { res.stream.resume(); return; } // serveur sans flux GET : legitime, on s'en passe
@@ -173,12 +177,12 @@ export class HttpTransport extends EventEmitter {
       if (res.status < 200 || res.status >= 300 || !(res.headers['content-type'] || '').includes('text/event-stream')) {
         res.stream.resume();
         if (this._closed) return;
-        await this._delay(500);
+        await this._delay(GET_RETRY_MS);
         continue;
       }
       await this._consumeSse(res.stream);
       if (this._closed) return;
-      await this._delay(300); // stream clos par le serveur : petite pause puis re-ouverture
+      await this._delay(GET_REOPEN_MS); // stream clos par le serveur : petite pause puis re-ouverture
     }
   }
 

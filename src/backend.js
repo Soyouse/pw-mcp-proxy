@@ -11,6 +11,10 @@
 import { EventEmitter } from 'node:events';
 import { log } from './logger.js';
 import { describeError } from './error-detail.js';
+// ⚠️ SOURCE UNIQUE des delais (budget.js) — NE JAMAIS redeclarer une duree ici, pas meme en
+// litteral nu dans un `??` : c'est sous cette forme que 2 delais ont vecu HORS source unique
+// jusqu'au 03/08, invisibles au gate (qui ne lisait que les constantes en MAJUSCULES).
+import { PING_INTERVAL_MS, PING_TIMEOUT_MS, MAX_MISSED_PINGS } from './budget.js';
 
 export class Backend extends EventEmitter {
   // ⚠️ options.ping* = WATCHDOG DE LIVENESS (garde-fou fails-closed contre le GEL du backend).
@@ -31,9 +35,9 @@ export class Backend extends EventEmitter {
     this._startPromise = null;
     this._exited = false;
     // Watchdog : n'agit que TANT QU'une requete est en vol (spec MCP utilities/ping : eviter le ping excessif).
-    this._pingIntervalMs = options.pingIntervalMs ?? 15000; // periode entre deux pings quand ca attend
-    this._pingTimeoutMs = options.pingTimeoutMs ?? 10000; // budget de reponse d'UN ping
-    this._maxMissedPings = options.maxMissedPings ?? 3; // pings rates CONSECUTIFS => backend declare fige
+    this._pingIntervalMs = options.pingIntervalMs ?? PING_INTERVAL_MS; // periode entre deux pings quand ca attend
+    this._pingTimeoutMs = options.pingTimeoutMs ?? PING_TIMEOUT_MS; // budget de reponse d'UN ping
+    this._maxMissedPings = options.maxMissedPings ?? MAX_MISSED_PINGS; // pings rates CONSECUTIFS => backend declare fige
     this._watchdog = null; // handle setInterval (null = inactif)
     this._missedPings = 0; // compteur de pings rates consecutifs (reset des qu'un ping repond)
   }

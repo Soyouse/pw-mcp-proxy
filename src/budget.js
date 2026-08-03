@@ -103,6 +103,31 @@ export const PROBE_TIMEOUT_MS = 2000;
 // que le refcount du noyau rend SANS OBJET (une socket fermee est un FAIT, pas une estimation).
 // ⚠️ En avoir besoin a nouveau = le signal qu'un registre est revenu par la fenetre.
 
+// 🛑 WATCHDOG DE LIVENESS (backend.js) — RAPATRIES ICI LE 03/08. Ils vivaient en LITTERAUX NUS
+// (`options.pingIntervalMs ?? 15000`) dans backend.js, c'est-a-dire dans le fichier que l'en-tete
+// de CE module nomme EXPLICITEMENT comme interdit. Ils echappaient au gate parce que
+// `no-inference-gate` ne reconnait que les CONSTANTES EN MAJUSCULES (`RX_CONST`) : un nombre ecrit
+// a la main dans un `??` etait donc un delai HORS SOURCE UNIQUE, et INVISIBLE au cliquet.
+// ⚠️ NE JAMAIS re-inliner une de ces valeurs dans backend.js « parce que c'est juste un defaut » :
+// c'est exactement la dispersion couche par couche qui a coute la connexion MCP du 31/07.
+// Motif du delai : INDECIDABLE (distinguer un backend FIGE d'un backend OCCUPE = probleme de
+// l'arret ; aucune observation exacte n'existe). Genereux a dessein : un faux positif tuerait une
+// action longue LEGITIME (upload de 12 min), et le ping ne tourne QUE si une requete est en vol.
+export const PING_INTERVAL_MS = 15000; // periode entre deux pings tant qu'une requete est en vol
+export const PING_TIMEOUT_MS = 10000; // budget de reponse d'UN ping
+// ⚠️ Ce n'est PAS une duree mais un COMPTE de pings rates consecutifs. Il vit ici quand meme :
+// c'est lui qui fixe le delai REEL avant de declarer un gel (3 x 15 s), et le separer de ses deux
+// facteurs rendrait ce delai total illisible — donc non arbitrable le jour ou il faudra.
+export const MAX_MISSED_PINGS = 3;
+
+// 🛑 BACKOFF DE REOUVERTURE DU FLUX GET SSE (http-transport.js) — RAPATRIES ICI LE 03/08, meme
+// raison que ci-dessus (ils etaient ecrits `_delay(500)` / `_delay(300)` en dur, invisibles au gate).
+// Motif : DISTANT (le pair est hors de portee du noyau local, aucune autorite a interroger).
+// ⚠️ Ces pauses ne bornent RIEN : elles evitent seulement de marteler un serveur qui refuse. La
+// borne de la boucle elle-meme est un DEFAUT CONNU et se traite en amont (cf doc transports).
+export const GET_RETRY_MS = 500; // apres un echec de connexion / une reponse inattendue
+export const GET_REOPEN_MS = 300; // apres une cloture NORMALE du flux par le serveur
+
 // Periode de scrutation du fichier de config (hot-reload). fs.watchFile POLLE : trop court = reveils
 // inutiles a la seconde ; trop long = un changement de profil met des secondes a etre vu. 1 s = compromis
 // eprouve. ⚠️ NE PAS descendre : ce timer tourne en permanence, pour un fichier qui change 2x par mois.

@@ -22,9 +22,11 @@ import { acquerirProfil } from './daemon-client.js';
 import { CONFIG_WATCH_INTERVAL_MS } from './budget.js';
 // ⚠️ describeError : JAMAIS `e.message` seul (il peut etre VIDE — incident 01/08).
 import { describeError } from './error-detail.js';
+// ⚠️ SOURCE UNIQUE du repli de version MCP (3 copies avant l'audit du 03/08).
+import { PROTOCOL_FALLBACK } from './protocol.js';
 
 const DEFAULT_CLIENT_INFO = {
-  protocolVersion: '2025-06-18',
+  protocolVersion: PROTOCOL_FALLBACK,
   capabilities: {},
   clientInfo: { name: 'pw-mcp-proxy', version: '1.0.0' },
 };
@@ -309,11 +311,12 @@ export class Manager {
     return Object.entries(this.config.profiles).map(([name, p]) => ({ name, label: p.label || name }));
   }
 
-  // Tous les --user-data-dir declares (needles du boot-sweep / restart_profile).
-  // UNIQUES a nos profils isoles => jamais le Chrome perso (AppData\...\User Data).
-  userDataDirs() {
-    return Object.values(this.config.profiles).map((p) => p.userDataDir).filter(Boolean);
-  }
+  // ⚠️ `userDataDirs()` A ETE SUPPRIME LE 03/08/2026 (audit) : CODE MORT. Son commentaire annoncait
+  // « needles du boot-sweep / restart_profile », or le boot-sweep global a ete retire le 02/08 avec
+  // le superviseur, et `restartProfile` lit le udd du SEUL profil vise (chirurgical, ci-dessous) —
+  // jamais la liste entiere. Verifie : zero appelant dans `src/` comme dans `tests/`.
+  // 🛑 NE PAS le recreer : une methode qui rend TOUS les user-data-dir n'a qu'un usage possible, le
+  // balayage LARGE — precisement la regression P0-inverse (tuer le serveur d'un AUTRE agent).
 
   // restart_profile (P1) : libere le verrou d'UN profil bloque et respawn un backend propre.
   // 1) stop() du backend connu (tree-kill son arbre) ; 2) sweep de tout ORPHELIN tenant encore
