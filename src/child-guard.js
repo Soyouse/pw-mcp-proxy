@@ -143,7 +143,23 @@ function partir(code, raison) {
   // ⚠️ LOGGUER AVANT DE TUER : on sort juste après, une trace écrite ensuite pourrait ne jamais
   // partir. Et c'est le seul endroit du système d'où cet événement est observable.
   log(`[gardien] ${raison} => arret du serveur (pid=${enfant.pid ?? '?'})`);
-  if (enfant.pid) { try { treeKill(enfant.pid); } catch { /* deja mort : tant mieux */ } }
+  // 🛑 SUR POSIX ON TUE NOTRE GROUPE (`process.pid`), PAS LE PID DE L'ENFANT. Contre-intuitif, et
+  // pourtant c'est la seule forme correcte (defaut trouve le 03/08/2026, branche fix/guard-group-kill) :
+  //   • le daemon nous lance `detached` ⇒ NOUS sommes chef de groupe (pgid === notre pid) ;
+  //   • notre enfant est lance SANS `detached` ⇒ il est DANS notre groupe, sans en etre le chef.
+  // Donc `kill(-enfantPid)` ne designe AUCUN groupe ⇒ `treeKill` retombe sur `kill(enfantPid)` ⇒ le
+  // serveur meurt mais **CHROME, son petit-enfant, SURVIT** en tenant le `--user-data-dir` : le
+  // profil devient inutilisable, c'est-a-dire exactement l'orphelin que ce fichier existe pour
+  // interdire. `treeKill(process.pid)` vise le groupe ENTIER — gardien + serveur + Chrome.
+  // ⚠️ NE PAS « corriger » en detachant l'enfant : il quitterait notre groupe, et le
+  // `treeKill(pidGardien)` du daemon ne l'atteindrait plus — on rouvrirait l'orphelin par l'autre
+  // bout. L'enfant DOIT rester dans notre groupe ; c'est NOUS qui devons viser le groupe.
+  // ⚠️ WINDOWS EN EST EXCLU, et ce n'est pas un oubli : `taskkill /T /F` descend l'arbre par
+  // PARENTE, sans notion de groupe, donc viser l'enfant y est deja exact. Viser `process.pid` nous
+  // tuerait NOUS AVANT le `process.exit(code)` ci-dessous ⇒ le daemon lirait une mort par signal au
+  // lieu de notre code de sortie, et perdrait l'information la plus utile de l'incident.
+  const cible = process.platform === 'win32' ? enfant.pid : process.pid;
+  if (cible) { try { treeKill(cible); } catch { /* deja mort : tant mieux */ } }
   process.exit(code);
 }
 
