@@ -23,6 +23,9 @@ let pertes = 0; // lignes definitivement perdues depuis le dernier retour a la n
 let pertesTotales = 0; // cumul sur la vie du process (jamais remis a zero)
 let onPerte = null; // injecte (cf log-boot.js) — evite un cycle logger <-> notify
 let criEmis = false; // une seule alerte par EPISODE (reamorcee au retour a la normale)
+// ⚠️ VRAI pendant l'emission du cri : la ligne que `alert()` ecrit echouera elle aussi (le journal
+// est casse) et se compterait comme une perte du SYSTEME. Le compteur doit rester JUSTE.
+let enCri = false;
 
 /**
  * @param {string} file
@@ -39,6 +42,7 @@ export function initLogger(file, opts = {}) {
   pertes = 0;
   pertesTotales = 0;
   criEmis = false;
+  enCri = false; // ⚠️ un re-init pendant un cri laisserait le compteur SOURD a jamais
   enabled = true;
 }
 
@@ -113,15 +117,24 @@ export function log(...args) {
     }
   } catch {
     // SILENCE OBLIGATOIRE (cf ci-dessus) — mais JAMAIS d'ignorance : on compte, et on crie UNE fois.
-    pertes++;
-    pertesTotales++;
+    // ⚠️ On ne compte PAS l'echo de notre PROPRE alerte (cf `enCri`) : ce serait mesurer notre
+    // diagnostic au lieu de la panne, et le nombre lu en incident serait faux.
+    if (!enCri) { pertes++; pertesTotales++; }
     if (!criEmis) {
       criEmis = true;
       // 🛑 LE CRI DOIT SORTIR DU JOURNAL, puisque c'est le journal qui est en panne. `onPerte` mene
       // a `alert()` (NTFY) — le seul canal qui survit a un disque plein. Best-effort STRICT : une
       // alerte qui throw ferait tomber le proxy pour une ligne de log, le remede devenu la panne.
+      // ⚠️ `enCri` : `alert()` COMMENCE par `log()`, qui echouera lui aussi puisque le journal est
+      // casse. Sans ce drapeau, notre propre diagnostic se compte comme une ligne perdue et GONFLE
+      // le compteur (mesure : 3 au lieu de 2). Le compteur doit dire ce que le SYSTEME a perdu,
+      // jamais l'echo de nos alertes — sinon le nombre qu'on lira en incident sera faux.
+      // ⚠️ Ce n'est PAS une garde anti-recursion (`criEmis` s'en charge deja) : c'est la JUSTESSE
+      // de la mesure. Trouve par le test de contrat de `log-boot.js`, pas par relecture.
+      enCri = true;
       try { onPerte?.(`journal INECRIVABLE (${logFile}) — des lignes sont perdues (disque plein ? chemin invalide ?)`); }
       catch { /* SILENCE: alerter est best-effort ; son echec ne justifie pas de tomber */ }
+      finally { enCri = false; }
     }
   }
 }

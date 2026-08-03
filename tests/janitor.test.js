@@ -71,6 +71,65 @@ test('cross-OS : un needle en / matche une cmdline en \\ (et réciproquement)', 
   expect(victimesConcierge({ daemonVivant: false, processus: machine, uddNeedles: UDD })).toEqual([1]);
 });
 
+// ── ENTRÉES MALFORMÉES — révélées par la MUTATION (78 % → tous ces cas étaient AVEUGLES) ──────
+//
+// 🛑 CHAQUE `test()` CI-DESSOUS TUE UN MUTANT QUI A SURVÉCU LE 03/08. Ce ne sont pas des cas
+// « théoriques » : `victimesConcierge` est appelée avec des faits venant d'une énumération de
+// process de l'OS et d'un `profiles.json` édité à la main. Un champ absent, une entrée nulle, un
+// pid non numérique — tout ça ARRIVE. Et comme la fonction décide de TUER, chaque défaut d'entrée
+// non couvert est un défaut sur un chemin destructeur.
+
+test('AUCUN fait fourni ⇒ INACTION (fails-closed jusque dans la signature)', () => {
+  // ⚠️ Mutant `daemonVivant = true` → `false` : un appel malformé DÉCLENCHERAIT le balayage.
+  // C'est le pire mutant possible sur ce fichier, et rien ne le tuait.
+  expect(victimesConcierge()).toEqual([]);
+  expect(victimesConcierge({})).toEqual([]);
+  expect(victimesConcierge(null)).toEqual([]);
+
+  // 🛑 LE CAS QUI COMPTE VRAIMENT, et que les trois lignes ci-dessus NE COUVRENT PAS : des process
+  // sont fournis, mais `daemonVivant` est OMIS. Avec une liste vide, la valeur par défaut est
+  // indétectable (le résultat vaut `[]` dans les deux cas) — la mutation l'a prouvé en survivant.
+  // Ici, si le défaut basculait à `false`, on BALAIERAIT sur un appel incomplet.
+  const machine = [p(1, 'node child-guard.js'), p(2, 'chrome --user-data-dir=C:/Users/theo/.pw-profiles/vegeta')];
+  expect(victimesConcierge({ processus: machine, uddNeedles: UDD }),
+    "`daemonVivant` OMIS doit valoir VIVANT (donc inaction) : un appel incomplet ne doit JAMAIS " +
+    "autoriser un balayage. C'est le fails-closed porté par la signature elle-même.").toEqual([]);
+});
+
+test('champs ABSENTS ou null ⇒ listes vides, jamais une cible inventée', () => {
+  // ⚠️ Mutants `processus = []` / `uddNeedles = []` → `["Stryker was here"]` : un défaut de valeur
+  // par défaut ferait naître une aiguille FANTÔME, donc potentiellement une victime étrangère.
+  expect(victimesConcierge({ daemonVivant: false })).toEqual([]);
+  expect(victimesConcierge({ daemonVivant: false, processus: null, uddNeedles: null })).toEqual([]);
+  expect(victimesConcierge({ daemonVivant: false, uddNeedles: UDD })).toEqual([]);
+});
+
+test('aiguilles VIDES filtrées — sinon une chaîne vide matcherait TOUT process', () => {
+  // 🛑 LE MUTANT LE PLUS DANGEREUX DU FICHIER : retirer `.filter(Boolean)`. Une entrée vide dans
+  // `userDataDir` (champ oublié dans profiles.json) donnerait `''`, et `c.includes('')` est
+  // TOUJOURS vrai ⇒ **tous les process de la machine deviendraient des victimes**.
+  const machine = [p(1, 'C:/Program Files/Google/Chrome/Application/chrome.exe'), p(2, '/usr/bin/firefox')];
+  expect(victimesConcierge({ daemonVivant: false, processus: machine, uddNeedles: ['', null, undefined] }),
+    "une aiguille vide ne doit JAMAIS matcher — ce serait un massacre silencieux").toEqual([]);
+});
+
+test('entrées de process INVALIDES ignorées (null, pid non numérique)', () => {
+  // ⚠️ Mutants sur `!p` et `typeof p.pid !== 'number'` : sans ces gardes, une énumération partielle
+  // de l'OS ferait THROW la fonction — or elle DOIT être totale (un concierge qui tombe laisse la
+  // machine sale sans le dire).
+  const sales = [null, undefined, { cmd: 'child-guard.js' }, { pid: 'abc', cmd: 'child-guard.js' }, p(7, 'node child-guard.js')];
+  expect(victimesConcierge({ daemonVivant: false, processus: sales, uddNeedles: UDD }),
+    'seule l entrée BIEN FORMÉE est retenue').toEqual([7]);
+});
+
+test('PID DUPLIQUÉ ⇒ une seule victime (on ne tue jamais deux fois le même process)', () => {
+  // ⚠️ Mutant sur `vus.has(p.pid)` : la déduplication existait sans qu'AUCUN test ne l'exerce.
+  // Un `treeKill` rejoué sur un pid déjà mort peut viser un pid RÉATTRIBUÉ entre-temps — donc un
+  // process ÉTRANGER. La dédup n'est pas de l'hygiène, c'est une protection.
+  const doublons = [p(5, 'node child-guard.js a'), p(5, 'node child-guard.js a'), p(6, 'chrome --user-data-dir=C:/Users/theo/.pw-profiles/vegeta')];
+  expect(victimesConcierge({ daemonVivant: false, processus: doublons, uddNeedles: UDD })).toEqual([5, 6]);
+});
+
 // ── PROPRIÉTÉS (invariants forts, pas des exemples) ───────────────────────────────────────────
 test('PROPRIÉTÉ : daemon vivant ⇒ ensemble de victimes VIDE, pour toute machine imaginable', () => {
   fc.assert(fc.property(
