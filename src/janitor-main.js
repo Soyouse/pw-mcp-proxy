@@ -52,6 +52,12 @@ process.on('unhandledRejection', (e) => log('concierge unhandledRejection: ' + d
 const MOI = path.join(__dirname, 'janitor-main.js');
 const NOM_TACHE = 'pw-mcp-proxy-concierge';
 
+// 🛑 BOM UTF-16 ECRITE EN ECHAPPEMENT, JAMAIS EN CARACTERE LITTERAL. Un U+FEFF pose tel quel dans
+// le source est INVISIBLE a la relecture et se fait mutiler par la conversion de fins de ligne au
+// checkout Windows => `SyntaxError: Invalid or unexpected token`, sur Windows UNIQUEMENT (CI ROUGE
+// le 03/08, verte sur Linux et macOS). L'echappement est explicite, portable, et se voit.
+const BOM = String.fromCharCode(0xFEFF); // U+FEFF, jamais un caractere litteral
+
 /**
  * L'utilisateur pour qui la tâche est créée (Windows).
  * ⚠️ `os.userInfo()` JETTE quand l'uid n'a pas d'entrée passwd — même piège que `channel-name.js`,
@@ -103,12 +109,12 @@ export function planInstallation(plateforme, node = process.execPath, script = M
       // versions ; le Planificateur exporte lui-même en UTF-16. On écrit donc dans le format qu'il
       // produit, jamais dans celui qui « devrait marcher ».
       encodage: /** @type {BufferEncoding} */ ('utf16le'),
-      // 🛑 `﻿` = LA MARQUE D'ORDRE D'OCTETS (BOM), ET ELLE EST OBLIGATOIRE. Node écrit
+      // 🛑 `` = LA MARQUE D'ORDRE D'OCTETS (BOM), ET ELLE EST OBLIGATOIRE. Node écrit
       // l'UTF-16LE SANS BOM ; sans elle, le parseur de `schtasks` lit le fichier comme de l'ANSI et
       // rend « Le code XML de la tâche est mal formé — (1,2) un élément racine » (MESURÉ 03/08).
       // Le message accuse le XML, alors que le XML est valide : c'est l'ENCODAGE qui n'est pas
       // reconnu. Piège classique, et diagnostic trompeur — d'où ce commentaire.
-      contenu: `﻿<?xml version="1.0" encoding="UTF-16"?>
+      contenu: `${BOM}<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>pw-mcp-proxy : supprime les serveurs sans proprietaire (ouverture de session + sortie de veille)</Description>
