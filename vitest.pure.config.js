@@ -24,6 +24,7 @@ export default defineConfig({
       'tests/deadline.test.js',
       'tests/error-detail.test.js',
       'tests/channel-name.test.js',
+      'tests/janitor.test.js', // decision du concierge (victimesConcierge) — PURE + property
     ],
     globals: false,
   },

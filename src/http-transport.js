@@ -47,6 +47,13 @@ export class HttpTransport extends EventEmitter {
     this._closed = false;
     this._getAbort = null;
     this._getOpened = false;
+    // 🛑 MEMOIRE DU HANDSHAKE — indispensable a la conformite du 404 (cf `_rouvrirSession`).
+    // Le transport doit pouvoir REJOUER l'`initialize` SEUL, sans rien demander au Backend : c'est
+    // la seule facon de tenir le MUST de la spec sans remonter de logique HTTP dans `backend.js`
+    // (qui est AGNOSTIQUE au transport, invariant du depot).
+    this._initialize = null; // le dernier message `initialize` vu passer, tel quel
+    this._reouverture = null; // promesse de la reouverture EN COURS (serialise les concurrents)
+    this._nReinit = 0; // discriminant des ids internes (jamais ceux du Backend)
   }
 
   // Interface commune des transports. Rien a demarrer cote HTTP : le serveur partage vit DEJA — le
@@ -82,17 +89,35 @@ export class HttpTransport extends EventEmitter {
     });
   }
 
+  /**
+   * POST bas-niveau d'UN message JSON-RPC. SOURCE UNIQUE des en-tetes de POST.
+   * ⚠️ `send()` et `_rouvrirSession()` postaient le MEME bloc d'en-tetes, mot pour mot (detecte par
+   * `jscpd` le 03/08). Deux copies = le jour ou la spec ajoute un en-tete obligatoire, on en corrige
+   * une : le handshake de reprise partirait avec des en-tetes PERIMES, et seulement apres un 404 —
+   * c'est-a-dire dans le chemin le plus rare et le plus difficile a reproduire du transport.
+   * ⚠️ `accept` porte LES DEUX types : la spec autorise le serveur a repondre en JSON **ou** en SSE,
+   * au choix, sur n'importe quelle requete. En omettre un = 406 intermittent.
+   * @param {object} msg
+   */
+  _post(msg) {
+    return this._req(
+      'POST',
+      this._headers({ 'content-type': 'application/json', accept: 'application/json, text/event-stream' }),
+      JSON.stringify(msg),
+    );
+  }
+
   // POST un message. La/les reponse(s) remontent via l'event 'message'. Ne throw pas : signale
   // les echecs de transport via l'event 'error' (le Backend les traite comme une perte de backend).
-  async send(msg) {
+  async send(msg, dejaRouvert = false) {
     if (this._closed) return;
+    // ⚠️ MEMORISER L'`initialize` AU PASSAGE — il ne repassera jamais : le Backend ne l'emet qu'une
+    // fois. Sans cette copie, une session terminee par le serveur serait irrattrapable ICI, et il
+    // faudrait detruire tout le backend pour la refaire (l'ancien comportement, non conforme).
+    if (msg?.method === 'initialize') this._initialize = msg;
     let res;
     try {
-      res = await this._req(
-        'POST',
-        this._headers({ 'content-type': 'application/json', accept: 'application/json, text/event-stream' }),
-        JSON.stringify(msg)
-      );
+      res = await this._post(msg);
     } catch (e) {
       // ⚠️ describeError, JAMAIS e.message seul : `err.message` peut etre VIDE sur une erreur
       // socket, `err.code` ne l'est jamais (incident 01/08 non diagnosticable pour ce seul champ).
@@ -104,7 +129,17 @@ export class HttpTransport extends EventEmitter {
     if (sid) this.sessionId = sid; // capture a l'initialize
 
     if (res.status === 202) { res.stream.resume(); this._ensureGetStream(); return; } // notif/response acceptee, pas de corps
-    if (res.status === 404) { res.stream.resume(); this._fail('session expiree (404)'); return; }
+    if (res.status === 404) {
+      res.stream.resume();
+      // 🛑 UN 404 EST UN EVENEMENT NORMAL DE LA SPEC, PAS UNE PANNE — et c'est tout le sujet.
+      // « The server MAY terminate the session at any time, after which it MUST respond […] 404 »,
+      // et le client « MUST start a new session by sending a new InitializeRequest without a
+      // session ID ». On rejoue donc le handshake ICI, puis on REPREND la requete d'origine.
+      // ⚠️ `dejaRouvert` borne a UN essai : si le serveur 404 encore APRES un handshake tout neuf,
+      // ce n'est plus une session perimee — c'est une vraie panne, et elle doit remonter.
+      if (dejaRouvert || !(await this._rouvrirSession())) { this._fail('session expiree (404) et reouverture impossible'); return; }
+      return this.send(msg, true);
+    }
     if (res.status < 200 || res.status >= 300) { res.stream.resume(); this._fail(`HTTP ${res.status}`); return; }
 
     const ct = res.headers['content-type'] || '';
@@ -173,7 +208,13 @@ export class HttpTransport extends EventEmitter {
         continue;
       }
       if (res.status === 405) { res.stream.resume(); return; } // serveur sans flux GET : legitime, on s'en passe
-      if (res.status === 404) { res.stream.resume(); this._fail('session expiree (404 GET)'); return; }
+      if (res.status === 404) {
+        // MEME evenement normal que sur le POST (cf `send`). ⚠️ Ici on ne « reprend » rien : on
+        // reboucle simplement, et le prochain tour ouvrira le GET avec la session toute neuve.
+        res.stream.resume();
+        if (!(await this._rouvrirSession())) { this._fail('session expiree (404 GET) et reouverture impossible'); return; }
+        continue;
+      }
       if (res.status < 200 || res.status >= 300 || !(res.headers['content-type'] || '').includes('text/event-stream')) {
         res.stream.resume();
         if (this._closed) return;
@@ -184,6 +225,60 @@ export class HttpTransport extends EventEmitter {
       if (this._closed) return;
       await this._delay(GET_REOPEN_MS); // stream clos par le serveur : petite pause puis re-ouverture
     }
+  }
+
+  /**
+   * Rejoue le handshake sur CE transport apres un 404 — le MUST de la spec Streamable HTTP.
+   *
+   * 🛑 POURQUOI LE TRANSPORT, ET PAS LE BACKEND. Une session terminee par le serveur est un fait
+   * PUREMENT HTTP : le Backend, qui est AGNOSTIQUE au transport (invariant du depot), n'a pas a en
+   * connaitre l'existence. L'ancien comportement remontait ce 404 en `transport error` ⇒ le Backend
+   * se croyait mort ⇒ le Manager detruisait tout et respawnait. Ca marchait, mais ca ecrivait un
+   * evenement NORMAL comme une PANNE — mensonge de log qui a fait chercher un bug pendant 2 jours.
+   *
+   * ⚠️ LA REPONSE A CE HANDSHAKE N'EST **JAMAIS** REMISE AU BACKEND, et c'est vital : il a deja
+   * resolu son `initialize` il y a longtemps. Lui livrer une seconde reponse portant le MEME id
+   * corromprait sa table de correspondance. D'ou l'id INTERNE ci-dessous, hors de son espace.
+   * ⚠️ `notifications/initialized` est OBLIGATOIRE apres tout `initialize` (spec) : sans elle, le
+   * serveur peut refuser les requetes suivantes — on aurait « repare » la session en la laissant
+   * inutilisable, panne d'autant plus penible qu'elle serait intermittente.
+   * ⚠️ SERIALISE par `_reouverture` : N requetes en vol prennent le 404 ENSEMBLE. Sans ce partage,
+   * chacune ouvrirait sa session et toutes sauf la derniere seraient orphelines.
+   * @returns {Promise<boolean>} vrai si la session est rouverte
+   */
+  _rouvrirSession() {
+    if (this._reouverture) return this._reouverture; // une reouverture suffit pour tout le monde
+    this._reouverture = (async () => {
+      // ⚠️ SANS session-id : c'est litteralement ce que la spec exige (« without a session ID »).
+      // Le garder ferait re-refuser la requete par le serveur, en boucle.
+      this.sessionId = null;
+      if (!this._initialize) return false; // 404 AVANT tout handshake : rien a rejouer, vraie anomalie
+      const msg = { ...this._initialize, id: `pw-mcp-reinit-${++this._nReinit}` };
+      let res;
+      try { res = await this._post(msg); }
+      catch (e) { log('reouverture de session: ' + describeError(e)); return false; }
+      const sid = res.headers[SESSION_HEADER];
+      if (sid) this.sessionId = sid;
+      // Le corps est LU PUIS JETE (cf ci-dessus). Le consommer reste obligatoire : un flux non lu
+      // retient la socket, et `node:http` finirait par ne plus rien pouvoir envoyer.
+      // ⚠️ Le type de corps (JSON ou SSE) est SANS IMPORTANCE ici : on le draine dans les deux cas.
+      try { await this._readAll(res.stream); }
+      catch { /* SILENCE: le corps est jete de toute facon ; seuls le statut et le session-id comptent */ }
+      if (res.status < 200 || res.status >= 300) { log(`reouverture de session refusee: HTTP ${res.status}`); return false; }
+      // Notification (pas de reponse attendue) : on la POSTe directement pour ne pas repasser par
+      // `send()`, qui la memoriserait et pourrait re-declencher une reouverture en cascade.
+      try {
+        const r = await this._req(
+          'POST',
+          this._headers({ 'content-type': 'application/json', accept: 'application/json, text/event-stream' }),
+          JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })
+        );
+        r.stream.resume();
+      } catch (e) { log('notifications/initialized apres reouverture: ' + describeError(e)); }
+      log('session HTTP rouverte (404 = fin de session cote serveur, evenement NORMAL de la spec)');
+      return true;
+    })().finally(() => { this._reouverture = null; });
+    return this._reouverture;
   }
 
   _delay(ms) { return new Promise((r) => setTimeout(r, ms)); }

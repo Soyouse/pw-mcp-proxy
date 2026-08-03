@@ -12,11 +12,43 @@ let enabled = false;
 let maxBytes = 5 * 1024 * 1024; // 5 Mo par generation
 let maxFiles = 3; // file + file.1 + file.2 => borne DURE ~15 Mo
 
+// 🛑 LE JOURNAL PEUT ECHOUER, ET C'ETAIT LE SEUL SILENCE QU'ON NE POUVAIT PAS ASSUMER (03/08/2026).
+// Le `catch` d'`appendFileSync` est OBLIGATOIRE et le reste (cf plus bas : se logguer soi-meme =
+// recursion, faire remonter = tuer le proxy pour une ligne de journal). Mais avaler l'echec
+// SANS RIEN COMPTER produisait exactement la panne interdite : disque plein ⇒ **on perd
+// precisement le log dont on a besoin**, et rien nulle part ne dit qu'il manque quelque chose.
+// On lit ensuite un journal TROUE en le croyant complet — pire qu'un journal absent.
+// ⇒ Le SILENCE reste ; l'IGNORANCE, non. On compte, et on crie UNE fois, hors du journal.
+let pertes = 0; // lignes definitivement perdues depuis le dernier retour a la normale
+let pertesTotales = 0; // cumul sur la vie du process (jamais remis a zero)
+let onPerte = null; // injecte (cf log-boot.js) — evite un cycle logger <-> notify
+let criEmis = false; // une seule alerte par EPISODE (reamorcee au retour a la normale)
+
+/**
+ * @param {string} file
+ * @param {{maxBytes?:number, maxFiles?:number, onPerte?:((m:string)=>void)|null}} opts
+ * ⚠️ `onPerte` est INJECTE, jamais importe : `notify.js` importe deja `logger.js`, et le depot
+ * interdit tout cycle d'import (`no-circular` = ERROR, cliquet a zero). L'injection est ici la
+ * seule forme qui garde le graphe acyclique — ce n'est pas un gout, c'est une contrainte scellee.
+ */
 export function initLogger(file, opts = {}) {
   logFile = file;
   if (opts.maxBytes !== undefined) maxBytes = opts.maxBytes;
   if (opts.maxFiles !== undefined) maxFiles = opts.maxFiles;
+  if (opts.onPerte !== undefined) onPerte = opts.onPerte;
+  pertes = 0;
+  pertesTotales = 0;
+  criEmis = false;
   enabled = true;
+}
+
+/**
+ * Etat des pertes de journal. Fonction TOTALE, aucune I/O — un diagnostic ne doit jamais
+ * pouvoir aggraver la situation qu'il decrit.
+ * @returns {{enCours:number, total:number}}
+ */
+export function logPertes() {
+  return { enCours: pertes, total: pertesTotales };
 }
 
 // Taille REELLE du fichier. ⚠️ NE JAMAIS remplacer par un compteur d'octets en memoire : le projet
@@ -69,5 +101,27 @@ export function log(...args) {
   try {
     if (shouldRotate(_realSize(), lineBytes, maxBytes)) _rotate();
     fs.appendFileSync(logFile, line);
-  } catch { /* SILENCE: cf ci-dessus — logguer l'echec du log serait RECURSIF ; le signal est deja parti sur stderr */ }
+    // RETOUR A LA NORMALE. ⚠️ On le dit DANS le journal, et on reamorce le cri : un second episode
+    // (disque qui se remplit a nouveau) doit alerter a nouveau, sinon la 1re alerte vaudrait
+    // vaccination a vie contre toutes les suivantes.
+    if (pertes > 0) {
+      const perdues = pertes;
+      pertes = 0;
+      criEmis = false;
+      // Recursion IMPOSSIBLE : `pertes` vaut deja 0 et l'ecriture qui precede vient de reussir.
+      log(`[journal] ECRITURE RETABLIE — ${perdues} ligne(s) DEFINITIVEMENT PERDUE(S) (total ${pertesTotales})`);
+    }
+  } catch {
+    // SILENCE OBLIGATOIRE (cf ci-dessus) — mais JAMAIS d'ignorance : on compte, et on crie UNE fois.
+    pertes++;
+    pertesTotales++;
+    if (!criEmis) {
+      criEmis = true;
+      // 🛑 LE CRI DOIT SORTIR DU JOURNAL, puisque c'est le journal qui est en panne. `onPerte` mene
+      // a `alert()` (NTFY) — le seul canal qui survit a un disque plein. Best-effort STRICT : une
+      // alerte qui throw ferait tomber le proxy pour une ligne de log, le remede devenu la panne.
+      try { onPerte?.(`journal INECRIVABLE (${logFile}) — des lignes sont perdues (disque plein ? chemin invalide ?)`); }
+      catch { /* SILENCE: alerter est best-effort ; son echec ne justifie pas de tomber */ }
+    }
+  }
 }

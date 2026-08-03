@@ -7,7 +7,8 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 import { NdjsonReader } from './jsonrpc.js';
-import { initLogger, log } from './logger.js';
+import { log } from './logger.js';
+import { bootLogger } from './log-boot.js';
 import { Manager } from './manager.js';
 import { Router } from './router.js';
 import { describeError, stackOf } from './error-detail.js';
@@ -17,9 +18,9 @@ const root = path.resolve(__dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 
 const configPath = process.env.PW_MCP_PROFILES || path.join(root, 'profiles.json');
-const logPath = process.env.PW_MCP_LOG || path.join(root, 'pw-mcp-proxy.log');
-
-initLogger(logPath);
+// ⚠️ Journal amorce par le point UNIQUE (`log-boot.js`) : meme fichier pour proxy + daemon +
+// gardien (une seule chronologie), et cablage du cri de perte d'ecriture.
+const logPath = bootLogger(root);
 // ⚠️ DERNIERS FILETS du process : ce sont les seules traces d'une erreur que PERSONNE n'a rattrapee.
 // `describeError` AVANT la stack — une erreur socket a un `code` (ECONNRESET…) mais souvent un
 // `message` VIDE, et `.stack` seule affiche alors « Error\n at … » sans le moindre indice

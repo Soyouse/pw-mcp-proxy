@@ -19,7 +19,8 @@
     "src/deadline.js",
     "src/error-detail.js",
     "src/channel-name.js",
-    "src/daemon-protocol.js"
+    "src/daemon-protocol.js",
+    "src/janitor-pure.js"
   ],
   "reporters": [
     "clear-text",

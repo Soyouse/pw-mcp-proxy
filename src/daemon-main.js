@@ -16,12 +16,15 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
-import { initLogger, log } from './logger.js';
+import { log } from './logger.js';
+import { bootLogger } from './log-boot.js';
 import { ServerDaemon } from './server-daemon.js';
 import { describeError, stackOf } from './error-detail.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-initLogger(process.env.PW_MCP_LOG || path.join(__dirname, '..', 'pw-mcp-proxy.log'));
+// ⚠️ MEME journal que le proxy et le gardien (point UNIQUE `log-boot.js`) : un incident se lit sur
+// UNE chronologie. Recopier la resolution du chemin ici ferait diverger les trois en silence.
+bootLogger(path.join(__dirname, '..'));
 
 process.on('uncaughtException', (e) => log('daemon uncaughtException: ' + describeError(e) + ' | ' + stackOf(e)));
 process.on('unhandledRejection', (e) => log('daemon unhandledRejection: ' + describeError(e) + ' | ' + stackOf(e)));

@@ -140,6 +140,20 @@ function lancerDaemon(nomCanal, maxBrowsers) {
     // ligne puis se tait, donc aucun risque de pipe plein ni d'EPIPE quand ce proxy mourra.
     const args = [DAEMON_MAIN, nomCanal];
     if (maxBrowsers != null) args.push(String(maxBrowsers));
+    // 🛑 LE DAEMON DOIT ETRE VISIBLE DU RATCHET DE TEST — c'est la CAUSE RACINE du defaut #11
+    // (« le daemon et ses serveurs survivent aux runs », 6 orphelins mesures le 03/08/2026).
+    // Le ratchet du harnais scanne les CMDLINE a la recherche de son marqueur. Le gardien et le
+    // serveur le portent (ils viennent de la `spec`, construite par `taggedArgs`), mais le daemon,
+    // lui, est spawne ICI a partir de rien : sa cmdline etait VIERGE. Il echappait donc au scan,
+    // survivait a la suite, et gardait ses serveurs avec lui — un orphelin INVISIBLE au gate cense
+    // les interdire. Le gate existait, il regardait simplement a cote.
+    // ⚠️ On propage l'ENVIRONNEMENT vers la CMDLINE : `PWMCP_TEST` est herite par tout l'arbre,
+    // mais l'heritage n'est pas SCANNABLE de facon portable (lire l'env d'un tiers demande /proc
+    // sous Linux et WMI sous Windows). La cmdline, elle, se lit partout et de la meme facon.
+    // ⚠️ Position LIBRE : `lireLimite` rend `null` sur toute valeur non entiere (`Number(...)` =>
+    // NaN), donc ce jeton ne peut pas etre confondu avec une limite meme s'il tombe en argv[3].
+    // ⚠️ HORS TEST la variable est absente : la cmdline de PRODUCTION reste strictement inchangee.
+    if (process.env.PWMCP_TEST) args.push(process.env.PWMCP_TEST);
     const child = spawn(process.execPath, args, {
       stdio: ['ignore', 'pipe', 'ignore'],
       detached: true,
