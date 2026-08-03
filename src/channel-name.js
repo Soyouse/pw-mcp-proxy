@@ -39,6 +39,22 @@ const PREFIX = 'pw-mcp-';
  *    partage qu'aucun canal — mais c'est un DEFAUT CONNU, pas un cas nominal.
  */
 export function userSegment(info = null) {
+  // 🛑 SOUS TEST, LE CANAL EST ISOLE PAR CONSTRUCTION — ce n'est PAS un confort de test, c'est une
+  // regle de SURETE : **une suite de tests ne doit jamais pouvoir atteindre le daemon de
+  // PRODUCTION de l'utilisateur.**
+  // Defaut REEL trouve le 03/08/2026 : `integration.test.js` en mode http ne s'isolait pas ⇒ son
+  // proxy se connectait au daemon VIVANT du MCP `browser`. Ce daemon-la n'a pas `PWMCP_TEST` dans
+  // son environnement ⇒ la fixture `fake-backend.js` appliquait son garde fails-closed et REFUSAIT
+  // de demarrer (code 3) ⇒ « le serveur s'est ARRETE avant d'ecouter », 14 tests rouges.
+  // ⚠️ LE PIRE N'ETAIT PAS L'ECHEC, C'ETAIT SON INTERMITTENCE : le resultat dependait de la
+  // PRESENCE d'un daemon reel et de l'environnement avec lequel IL avait ete lance. Vert a 03h12,
+  // rouge a 05h08, code inchange. Une suite qui rougit au hasard est une suite qu'on cesse de lire.
+  // ⚠️ Et le risque symetrique est pire encore : sans isolation, un test peut faire SPAWNER ou TUER
+  // un serveur du daemon reel — c'est-a-dire toucher le navigateur de travail de l'utilisateur.
+  // ⚠️ `PWMCP_TEST` est pose UNIQUEMENT par `tests/harness.js` et herite par tout l'arbre. Hors
+  // test il est ABSENT : le comportement de production est strictement inchange.
+  const marqueur = process.env.PWMCP_TEST;
+  if (marqueur) return `t-${marqueur}`;
   try {
     const u = (info || os.userInfo()).username;
     return typeof u === 'string' && u !== '' ? u : 'anon';

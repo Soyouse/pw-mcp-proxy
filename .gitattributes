@@ -1,0 +1,20 @@
+# 🛑 FINS DE LIGNE FORCÉES EN LF DANS LE DÉPÔT ET AU CHECKOUT. Posé le 03/08/2026.
+#
+# POURQUOI : les runners Windows de GitHub Actions ont `core.autocrlf=true` par défaut. Sans ce
+# fichier, le MÊME commit est matérialisé différemment selon l'OS ⇒ un défaut peut n'exister QUE
+# sur la copie Windows, et rester introuvable en local (le fichier qu'on a écrit n'est jamais
+# re-checkouté). Mesuré le 03/08 : `SyntaxError: Invalid or unexpected token` à l'import de
+# `janitor-main.js`, ROUGE sur windows-latest UNIQUEMENT, alors que `node --check` passait en local
+# sur la MÊME machine Windows et que le blob committé était propre.
+#
+# ⚠️ `eol=lf` (et pas seulement `text=auto`) : `text=auto` normalise ce qui est STOCKÉ, mais laisse
+# le checkout suivre `core.autocrlf` de la machine. Seul `eol=lf` impose la même matérialisation
+# PARTOUT — c'est ce qui rend la CI reproductible.
+# ⚠️ NE PAS retirer : on rouvrirait une classe de pannes qui ne se voit que sur un seul OS.
+* text=auto eol=lf
+
+# Binaires : jamais touchés.
+*.png binary
+*.jpg binary
+*.ico binary
+*.svg text eol=lf
