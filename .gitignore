@@ -16,3 +16,6 @@ spec/*_TTrace_*.tla
 spec/*_TTrace_*.bin
 spec/*.st
 spec/states/
+
+# Plan de cloture interne (mentionne le mainteneur ; repo PUBLIC)
+PLAN-CLOTURE.md
