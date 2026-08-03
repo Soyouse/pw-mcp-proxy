@@ -33,6 +33,7 @@
 //   node src/janitor-main.js --print    → écrit sur stdout l'unité/la commande, sans rien installer
 
 import path from 'node:path';
+import os from 'node:os';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -52,6 +53,16 @@ const MOI = path.join(__dirname, 'janitor-main.js');
 const NOM_TACHE = 'pw-mcp-proxy-concierge';
 
 /**
+ * L'utilisateur pour qui la tâche est créée (Windows).
+ * ⚠️ `os.userInfo()` JETTE quand l'uid n'a pas d'entrée passwd — même piège que `channel-name.js`,
+ * qui l'a déjà payé. On rend `''` : `planInstallation` reste une fonction TOTALE, et l'échec
+ * éventuel viendra de `schtasks`, bruyamment, jamais d'une exception dans un installateur.
+ */
+function utilisateurCourant() {
+  try { return os.userInfo().username || ''; } catch { return ''; }
+}
+
+/**
  * Les commandes/unités d'installation, PAR PLATEFORME. Fonction PURE (rend du texte, n'exécute
  * rien) : `--print` permet de LIRE ce qu'on s'apprête à faire à la machine avant de le faire.
  * ⚠️ Un installateur qu'on ne peut pas inspecter est un installateur qu'on n'ose pas lancer.
@@ -60,22 +71,79 @@ const NOM_TACHE = 'pw-mcp-proxy-concierge';
  *   tâche planifiée n'est PAS celui du shell de l'utilisateur — cause classique de tâche qui ne
  *   tourne jamais, en silence)
  */
-export function planInstallation(plateforme, node = process.execPath, script = MOI) {
+export function planInstallation(plateforme, node = process.execPath, script = MOI, utilisateur = utilisateurCourant()) {
   if (plateforme === 'win32') {
-    // ⚠️ DEUX tâches, car un déclencheur `ONSTART` et un déclencheur d'ÉVÉNEMENT ne peuvent pas
-    // coexister dans un `schtasks /create` unique.
-    // ⚠️ `/RL LIMITED` : le concierge n'a AUCUN besoin d'élévation (il ne tue que des process de
-    // l'utilisateur courant). Demander l'admin serait un privilège gratuit — donc une faute.
-    const commande = `"${node}" "${script}"`;
+    // 🛑 INSTALLATION PAR **XML** (`schtasks /create /xml`), ET NON PAR LES RACCOURCIS `/sc`.
+    // Les raccourcis ont été essayés, et la doc officielle explique pourquoi ils ne peuvent PAS
+    // convenir ici (learn.microsoft.com « schtasks create », lu le 03/08/2026) :
+    //   · `/sc ONSTART` s'exécute « every time the system starts », donc HORS session ⇒ droits
+    //     machine exigés. Nos process n'existent QUE dans la session de l'utilisateur : c'est SON
+    //     `--user-data-dir`, SON Chrome, SON daemon. Le privilège serait gratuit, donc fautif.
+    //   · `/sc ONLOGON` sans `/ru` vaut « whenever a user (**any user**) logs on » ⇒ machine-wide,
+    //     même refus. Et AVEC `/ru`, la doc est explicite : « Schtasks **always prompts for a
+    //     password** unless you provide one, **even when you schedule a task on the local computer
+    //     using the current user account**. » Sans terminal interactif — notre cas TOUJOURS — la
+    //     création échoue. ⚠️ `/np` ne suffit pas (MESURÉ : l'invite apparaît quand même).
+    //   · Et deux déclencheurs ne peuvent pas coexister dans un `/sc` unique ⇒ il aurait fallu
+    //     DEUX tâches, donc deux définitions à maintenir en phase. Duplication par contrainte d'outil.
+    //
+    // ✅ Le XML est la surface COMPLÈTE du Planificateur (`/xml <xmlfile>` est documenté au même
+    // endroit), et il règle les trois points d'un coup :
+    //   · `<LogonTrigger><UserId>` — l'ouverture de session de CET utilisateur, pas de « any user » ;
+    //   · `<EventTrigger>` — le réveil, MÊME tâche, aucune duplication ;
+    //   · `<LogonType>InteractiveToken</LogonType>` — la tâche s'exécute avec le jeton de la session
+    //     déjà ouverte ⇒ **AUCUN mot de passe demandé, AUCUN secret stocké, AUCUNE élévation**.
+    //     C'est le mécanisme prévu par Windows pour exactement ce besoin.
+    // ⚠️ NE PAS « simplifier » en revenant à `/sc` : on retomberait sur les refus ci-dessus.
+    const compte = utilisateur ? `${process.env.USERDOMAIN || '.'}\\${utilisateur}` : utilisateur;
     return {
-      type: 'schtasks',
-      commandes: [
-        ['/create', '/f', '/tn', `${NOM_TACHE}-boot`, '/sc', 'onstart', '/rl', 'limited', '/tr', commande],
-        // ID 1 de Power-Troubleshooter = « sortie de veille » (journal Système). Événement OFFICIEL.
-        ['/create', '/f', '/tn', `${NOM_TACHE}-reveil`, '/rl', 'limited', '/tr', commande,
-          '/sc', 'onevent', '/ec', 'System',
-          '/mo', "*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]"],
-      ],
+      type: 'schtasks-xml',
+      nom: NOM_TACHE,
+      // ⚠️ UTF-16 : `schtasks /xml` REFUSE un fichier en UTF-8 avec BOM ou en ANSI selon les
+      // versions ; le Planificateur exporte lui-même en UTF-16. On écrit donc dans le format qu'il
+      // produit, jamais dans celui qui « devrait marcher ».
+      encodage: /** @type {BufferEncoding} */ ('utf16le'),
+      // 🛑 `﻿` = LA MARQUE D'ORDRE D'OCTETS (BOM), ET ELLE EST OBLIGATOIRE. Node écrit
+      // l'UTF-16LE SANS BOM ; sans elle, le parseur de `schtasks` lit le fichier comme de l'ANSI et
+      // rend « Le code XML de la tâche est mal formé — (1,2) un élément racine » (MESURÉ 03/08).
+      // Le message accuse le XML, alors que le XML est valide : c'est l'ENCODAGE qui n'est pas
+      // reconnu. Piège classique, et diagnostic trompeur — d'où ce commentaire.
+      contenu: `﻿<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>pw-mcp-proxy : supprime les serveurs sans proprietaire (ouverture de session + sortie de veille)</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled><UserId>${compte}</UserId></LogonTrigger>
+    <EventTrigger>
+      <Enabled>true</Enabled>
+      <Subscription>&lt;QueryList&gt;&lt;Query Id="0" Path="System"&gt;&lt;Select Path="System"&gt;*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;</Subscription>
+    </EventTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>${compte}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>${node}</Command>
+      <Arguments>"${script}"</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+`,
     };
   }
   if (plateforme === 'darwin') {
@@ -123,13 +191,19 @@ async function principal() {
 
   if (args.includes('--install')) {
     const plan = planInstallation(process.platform);
-    if (plan.type === 'schtasks') {
-      for (const c of plan.commandes) {
-        const r = spawnSync('schtasks', c, { encoding: 'utf8', windowsHide: true });
-        // ⚠️ On NE MASQUE PAS un échec d'installation : une tâche non créée = un concierge qui ne
-        // tournera jamais, et personne ne s'en apercevrait avant la prochaine panne.
-        if (r.status !== 0) { process.stderr.write(`schtasks ECHEC (${r.status}): ${r.stderr || r.stdout}\n`); process.exitCode = 1; }
-      }
+    if (plan.type === 'schtasks-xml') {
+      const fs = await import('node:fs');
+      // Fichier TEMPORAIRE : le XML n'est qu'un véhicule, la vérité vit ensuite dans le
+      // Planificateur. Le laisser traîner créerait une 2e source qui pourrait diverger.
+      const tmp = path.join(os.tmpdir(), `${plan.nom}.xml`);
+      fs.writeFileSync(tmp, plan.contenu, plan.encodage);
+      // ⚠️ `/f` : ré-installer doit être IDEMPOTENT (remplace sans demander). Un installateur qu'on
+      // n'ose pas relancer est un installateur qu'on ne relance pas — donc qui dérive.
+      const r = spawnSync('schtasks', ['/create', '/f', '/tn', plan.nom, '/xml', tmp], { encoding: 'utf8', windowsHide: true });
+      try { fs.unlinkSync(tmp); } catch { /* SILENCE: nettoyage best-effort d'un fichier temporaire */ }
+      // ⚠️ On NE MASQUE PAS un échec d'installation : une tâche non créée = un concierge qui ne
+      // tournera jamais, et personne ne s'en apercevrait avant la prochaine panne.
+      if (r.status !== 0) { process.stderr.write(`schtasks ECHEC (${r.status}): ${r.stderr || r.stdout}\n`); process.exitCode = 1; }
     } else {
       const fs = await import('node:fs');
       fs.mkdirSync(path.dirname(plan.chemin), { recursive: true });
@@ -142,6 +216,11 @@ async function principal() {
         spawnSync('launchctl', ['load', '-w', plan.chemin], { encoding: 'utf8' });
       }
     }
+    // 🛑 NE JAMAIS ANNONCER UN SUCCES QU'ON N'A PAS. Mesuré sur soi-même le 03/08 : une des deux
+    // tâches avait échoué (« Accès refusé ») et cette ligne écrivait quand même « concierge
+    // installé ». Un installateur qui ment sur son résultat produit exactement la panne que tout ce
+    // fichier existe pour supprimer : on croit protégé un système qui ne l'est pas.
+    if (process.exitCode) { process.stderr.write(`concierge NON installe (${plan.type}) — cf erreurs ci-dessus\n`); return; }
     process.stdout.write(`concierge installe (${plan.type})\n`);
     return;
   }

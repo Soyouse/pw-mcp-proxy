@@ -130,12 +130,23 @@ test('MORT = canal qui n a JAMAIS existé (aucun fichier, aucun pipe)', async ()
 // s'abonne à un fait que le système SAIT déjà annoncer. Une régression vers un `setInterval` de
 // surveillance rendrait ce fichier rouge, et c'est exactement le but.
 test('DÉCLENCHEURS NATIFS : boot ET réveil, via le mécanisme officiel de chaque OS', () => {
-  const win = planInstallation('win32', 'C:/node.exe', 'C:/p/janitor-main.js');
-  expect(win.commandes.some((c) => c.includes('onstart')), 'Windows : démarrage').toBe(true);
-  expect(win.commandes.flat().join(' '),
-    'Windows : le réveil est l événement OFFICIEL Power-Troubleshooter ID 1 — jamais un sondage')
+  const win = planInstallation('win32', 'C:/node.exe', 'C:/p/janitor-main.js', 'moi');
+  // 🛑 Installation par XML : les raccourcis `/sc` ont TOUS été refusés sur une machine réelle
+  // (ONSTART = droits machine · ONLOGON sans /ru = « any user » donc machine aussi · ONLOGON avec
+  // /ru = invite de mot de passe, que `/np` ne supprime pas). Le XML est la surface complète.
+  expect(win.type).toBe('schtasks-xml');
+  expect(win.contenu, 'ouverture de session de CET utilisateur, jamais « any user »').toMatch(/<LogonTrigger>[\s\S]*<UserId>[^<]*moi<\/UserId>/);
+  expect(win.contenu, 'le réveil est l événement OFFICIEL Power-Troubleshooter ID 1 — jamais un sondage')
     .toContain("Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1");
-  expect(win.commandes.flat().join(' '), 'aucune élévation demandée : le concierge n en a pas besoin').toContain('limited');
+  // 🛑 CE QUI REND L'INSTALLATION POSSIBLE SANS RIEN DEMANDER À PERSONNE.
+  expect(win.contenu, 'InteractiveToken = jeton de la session déjà ouverte ⇒ AUCUN mot de passe, AUCUN secret stocké').toContain('InteractiveToken');
+  expect(win.contenu, 'LeastPrivilege : le concierge n a aucun besoin d élévation — la demander serait une faute').toContain('LeastPrivilege');
+  // ⚠️ BOM UTF-16 : sans elle `schtasks` rend « XML mal formé (1,2) », un message qui accuse le XML
+  // alors que c est l ENCODAGE. Diagnostic trompeur, mesuré — donc scellé.
+  expect(win.contenu.charCodeAt(0), 'BOM UTF-16 obligatoire en TÊTE de fichier').toBe(0xfeff);
+  expect(win.encodage).toBe('utf16le');
+  // Les deux déclencheurs dans UNE tâche : pas deux définitions à maintenir en phase.
+  expect((win.contenu.match(/<(LogonTrigger|EventTrigger)>/g) || []).length, 'DEUX déclencheurs, UNE tâche').toBe(2);
 
   const linux = planInstallation('linux', '/usr/bin/node', '/p/janitor-main.js');
   expect(linux.contenu, 'systemd lance l unité APRÈS le réveil').toContain('After=suspend.target');
@@ -147,6 +158,6 @@ test('DÉCLENCHEURS NATIFS : boot ET réveil, via le mécanisme officiel de chaq
 
   // ⚠️ Chemin ABSOLU de node : le PATH d une tâche planifiée n est PAS celui du shell. Un « node »
   // nu produit une tâche qui ne tourne JAMAIS, en silence — la panne muette parfaite.
-  expect(win.commandes.flat().join(' ')).toContain('C:/node.exe');
+  expect(win.contenu).toContain('C:/node.exe');
   expect(linux.contenu).toContain('/usr/bin/node');
 });

@@ -58,6 +58,8 @@
 - `tests/child-guard.test.js` — contrat du gardien : EOF ⇒ l'enfant meurt · symétrie · commande inlançable · **deux gardiens = tuyaux indépendants** (anti-fuite de descripteur) · gate `stdio:'ignore'`.
 - `tests/contract-snapshot.test.js` — drift-test des surfaces TIERCES (`contracts/playwright-mcp.json`) : un flag requis qui disparaît devient ROUGE au bump, jamais une panne en prod.
 - `tests/no-direct-active-profile-gate.test.js` — gate : `activeProfile` ne s'écrit QUE par `setActiveProfile` (sinon on saute la libération = boucle de spawn du 02/08).
+- `tests/janitor.test.js` — le CONCIERGE : décision pure (daemon vivant ⇒ zéro victime · Chrome perso jamais touché · cross-OS `/` vs `\`), 3 propriétés (fast-check), observation du noyau (`daemonVivant` sur un vrai canal), et gate des déclencheurs NATIFS (XML `InteractiveToken` + BOM UTF-16, systemd `suspend.target`, launchd + trou macOS nommé).
+- `tests/http-session-404.test.js` — conformité du 404 « fin de session » (spec Streamable HTTP) : ré-`initialize` seul + reprise, aucune erreur remontée, réponse du handshake interne JAMAIS livrée au Backend ; + negative-check (404 persistant = vraie panne, UN seul essai).
 - `tests/no-hardcoded-constant-gate.test.js` — gate « une verite partagee n existe qu UNE fois » : aucun delai en litteral hors `budget.js`, aucune version de protocole hors `protocol.js`, + negative-check rejouant les violations reelles du 03/08.
 - `tests/no-silent-catch-gate.test.js` — gate « LE SILENCE SE DÉCLARE » : aucun `catch {}` sans raison lisible, + double negative-check.
 - `tests/arborescence-gate.test.js` — gate de CE fichier, dans les deux sens : aucun fichier réel absent (TROU), aucun fichier cité disparu (MENSONGE).
