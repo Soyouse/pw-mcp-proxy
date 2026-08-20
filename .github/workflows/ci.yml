@@ -87,7 +87,32 @@ jobs:
           key: stryker-incremental-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
             stryker-incremental-${{ runner.os }}-
-      - run: npm run test:mut
+      # 🛑 LA BORNE DOIT VIVRE **DANS** LE RUNNER, PAS SEULEMENT AU-DESSUS DE LUI.
+      # MESURE 20/08/2026 (run 32357523205, job 96389817850) : `timeout-minutes: 10` a bien coupe le
+      # job — annule a 10:24:26 au lieu des 46 min de mort silencieuse — MAIS **AUCUN LOG N'A ETE
+      # TELEVERSE** : `/actions/jobs/96389817850/logs` rend `BlobNotFound`, et le zip du run ne
+      # contient que les AUTRES jobs. C'est LE RUNNER qui televerse ses logs : quand il ne repond
+      # plus, GitHub peut le FAUCHER, pas le faire PARLER. Une borne EXTERNE rend donc un verdict
+      # SANS diagnostic — mieux que rien, insuffisant pour reparer.
+      # ⇒ `timeout` (coreutils, present sur ubuntu-latest) tue le PROCESSUS depuis l'interieur,
+      # pendant que le runner est ENCORE VIVANT : le step sort en 124, le job est ROUGE, et la
+      # sortie de Stryker (reporter `progress-append-only` en CI) est televersee normalement — on
+      # voit donc a QUEL mutant ca se fige. 🛑 BORNE INTERNE TOUJOURS PLUS COURTE QUE LA BORNE
+      # EXTERNE (8 min < 10 min) : sinon GitHub fauche le runner en premier et on reperd les logs.
+      # ⚠️ `--kill-after` est OBLIGATOIRE : `npm` relaie SIGTERM, mais un process fige peut l'ignorer.
+      # Sans le SIGKILL de secours, la borne elle-meme pourrait pendre.
+      # ⚠️ Les sondes encadrantes testent l'hypothese OOM (seule explication connue d'un runner qui
+      # perd la communication sans qu'aucun step n'echoue). `dmesg` est l'autorite qui SAIT : le
+      # tueur OOM du noyau y laisse une trace nominative. On MESURE, on ne suppose pas.
+      - name: Sonde ressources (avant)
+        run: nproc && free -m && df -h /
+      - name: Gate mutation (borne DANS le runner)
+        run: timeout --verbose --signal=TERM --kill-after=60s 8m npm run test:mut
+      - name: Sonde ressources + tueur OOM (meme si rouge)
+        if: always()
+        run: |
+          free -m
+          sudo dmesg -T | grep -iE 'out of memory|oom-kill|killed process' | tail -20 || echo "aucune trace du tueur OOM"
       - name: Sauvegarder le fichier incremental Stryker
         if: always()
         uses: actions/cache/save@v4
