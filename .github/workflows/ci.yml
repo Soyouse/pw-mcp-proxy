@@ -58,7 +58,7 @@ jobs:
     # ⚠️ VALEUR ANCREE SUR UNE MESURE, jamais un chiffre rond de confort : run SAIN = **2 min 01 s**
     # (run 30772241326, 02/08/2026, meme workflow, meme absence de cache, 715 mutants). 10 min = 5x
     # cette reference. Au-dela, ce n'est plus de la lenteur : c'est une panne, et elle doit le DIRE.
-    timeout-minutes: 10
+    timeout-minutes: 9
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -98,7 +98,7 @@ jobs:
       # pendant que le runner est ENCORE VIVANT : le step sort en 124, le job est ROUGE, et la
       # sortie de Stryker (reporter `progress-append-only` en CI) est televersee normalement — on
       # voit donc a QUEL mutant ca se fige. 🛑 BORNE INTERNE TOUJOURS PLUS COURTE QUE LA BORNE
-      # EXTERNE (8 min < 10 min) : sinon GitHub fauche le runner en premier et on reperd les logs.
+      # EXTERNE (6 min < 9 min) : sinon GitHub fauche le runner en premier et on reperd les logs.
       # ⚠️ `--kill-after` est OBLIGATOIRE : `npm` relaie SIGTERM, mais un process fige peut l'ignorer.
       # Sans le SIGKILL de secours, la borne elle-meme pourrait pendre.
       # ⚠️ Les sondes encadrantes testent l'hypothese OOM (seule explication connue d'un runner qui
@@ -106,8 +106,28 @@ jobs:
       # tueur OOM du noyau y laisse une trace nominative. On MESURE, on ne suppose pas.
       - name: Sonde ressources (avant)
         run: nproc && free -m && df -h /
-      - name: Gate mutation (borne DANS le runner)
-        run: timeout --verbose --signal=TERM --kill-after=60s 8m npm run test:mut
+      # 🛑 LA SORTIE VA DANS UN FICHIER, JAMAIS DIRECTEMENT DANS LE TUYAU DU STEP.
+      # MESURE 20/08/2026 (run 32358951280) : `timeout ... 8m npm run test:mut` ecrivant dans le
+      # tuyau du step N'A PAS termine le step — il etait encore `in_progress` 10 min apres. Cause :
+      # `timeout` tue son enfant DIRECT (npm), pas le groupe ; les petits-enfants Stryker orphelins
+      # gardent le tuyau de sortie OUVERT, et le runner attend l'EOF qui ne vient jamais. La borne
+      # existait donc sans borner quoi que ce soit.
+      # ⚠️ En redirigeant vers un FICHIER, les orphelins retiennent le FICHIER, pas le tuyau : le
+      # step se termine TOUJOURS, donc le job se termine, donc **les logs sont televerses** (ils ne
+      # le sont qu'a la fin du JOB — verifie : le zip du run 32358951280 ne contenait AUCUN octet
+      # pour ce job, pas meme pour les steps termines dans les 20 premieres secondes).
+      # ⚠️ `exit $code` PRESERVE LE VERDICT : un depassement sort en 124, un score sous le plancher
+      # garde le code de Stryker. On ne troque JAMAIS le rouge contre du confort de diagnostic.
+      - name: Gate mutation (borne DANS le runner, sortie vers FICHIER)
+        run: |
+          set +e
+          timeout --verbose --signal=TERM --kill-after=30s 6m npm run test:mut > mutation.log 2>&1
+          code=$?
+          set -e
+          echo "::group::sortie Stryker (code de sortie: $code ; 124 = borne atteinte)"
+          tail -c 400000 mutation.log
+          echo "::endgroup::"
+          exit $code
       - name: Sonde ressources + tueur OOM (meme si rouge)
         if: always()
         run: |
