@@ -1,0 +1,77 @@
+# RÈGLE PARC — « la complexité se déclare » (ast-grep, analyse AST réelle)
+#
+# 3ᵉ jumeau du TEMPS et de l'ESPACE. Détecte TOUT parcours imbriqué dans un autre parcours.
+# Elle ne juge PAS et n'exempte RIEN : la politique (quel fichier a droit à combien, avec quelle
+# classe et quelle justification) vit dans UN SEUL endroit — tests/quadratique-gate.test.js —
+# qui consomme sa sortie JSON.
+#   • ast-grep = DÉTECTION exacte (vrai parseur ⇒ ignore commentaires et chaînes)
+#   • le test  = POLITIQUE + CLIQUET (budget par fichier, ne peut que descendre)
+# Dupliquer les exemptions ici créerait deux vérités qui divergent.
+#
+# POURQUOI : la cible est une flotte de CENTAINES de clients. Un défaut d'échelle ne « ralentit »
+# pas, il FERME UN CONTRAT — et il est de retrofit prohibitif, donc il appartient à la spec,
+# jamais à un réglage ultérieur. Question avant toute boucle : « et à 10 000 ? » — 5 000 éléments
+# comparés deux à deux = 12,5 M de paires.
+#
+# ⚠️⚠️ UN PARCOURS N'EST PAS SEULEMENT UNE BOUCLE `for`. Le seul O(N²) réellement MESURÉ dans ce
+#    parc était un `.find()` DANS une boucle — syntaxiquement PAS une boucle imbriquée. Une règle
+#    qui ne verrait que `for`-dans-`for` serait donc CREUSE, et contournable en réécrivant en
+#    `.map()`. ⇒ `PARCOURS` = les 4 nœuds de boucle du langage **ET** les méthodes de tableau qui
+#    parcourent. NE JAMAIS réduire cette liste à la syntaxe `for`.
+#
+# ⚠️ `for..of` et `for..in` sont le MÊME nœud tree-sitter (`for_in_statement`) et un nœud DISTINCT
+#    de `for_statement` : viser `for_statement` seul rate tous les `for..of`. Vérifié par témoin.
+#
+# ⚠️ La liste des méthodes est celle des parcours O(N) du langage. Une méthode ABSENTE d'ici est un
+#    trou ; on l'ajoute par MESURE (un témoin qui doit rougir), jamais par intuition.
+# ⚠️ AST et JAMAIS regex : un grep rend un mur de candidats presque tous faux (boucles sur des
+#    listes FIXES) — du bruit qui ferait abandonner le gate.
+
+id: no-undeclared-quadratic
+language: JavaScript
+severity: error
+message: "Parcours imbriqué non déclaré — la complexité se déclare (et à 10 000 ?)"
+note: |
+  Un parcours DANS un parcours est O(N²) tant que rien ne prouve le contraire.
+  O(N)/O(N log N) -> la boucle interne porte sur une liste BORNÉE (jetons, machines) : à déclarer.
+  DETTE           -> vraiment quadratique : déclarer l'IMPACT CHIFFRÉ, pas seulement le compte.
+  Sortie type : index inversé / Map / Set — élaguer ce qu'on PROUVE hors seuil, jamais
+  un algorithme probabiliste (un faux négatif a un coût client).
+
+utils:
+  # ⚠️ SOURCE UNIQUE de « qu'est-ce qu'un parcours ? » — définie ICI une seule fois et réutilisée
+  #    aux DEUX étages (extérieur et intérieur). L'écrire deux fois ferait diverger les deux
+  #    moitiés de la règle au premier ajout.
+  #
+  # 🛑 MÉTAVARIABLES NON CAPTURANTES (`$_IT`, `$$$_A`) — NE JAMAIS retirer les `_`.
+  #    Une métavariable CAPTURANTE s'UNIFIE entre les deux étages : `$IT` lié à `xs` au niveau
+  #    extérieur exigerait le MÊME `xs` au niveau intérieur ⇒ `xs.map(x => ys.find(...))`
+  #    — la forme la plus courante du O(N²) moderne — passerait au VERT. Trouvé par les TÉMOINS
+  #    avant mise en service, jamais par relecture.
+  est-un-parcours:
+    any:
+      - kind: for_statement       # for (let i = 0; ...)
+      - kind: for_in_statement    # for..of ET for..in (même nœud tree-sitter)
+      - kind: while_statement
+      - kind: do_statement
+      - pattern: $_IT.forEach($$$_A)
+      - pattern: $_IT.map($$$_A)
+      - pattern: $_IT.filter($$$_A)
+      - pattern: $_IT.reduce($$$_A)
+      - pattern: $_IT.flatMap($$$_A)
+      - pattern: $_IT.some($$$_A)
+      - pattern: $_IT.every($$$_A)
+      - pattern: $_IT.find($$$_A)
+      - pattern: $_IT.findIndex($$$_A)
+      - pattern: $_IT.findLast($$$_A)
+      - pattern: $_IT.includes($$$_A)
+      - pattern: $_IT.indexOf($$$_A)
+      - pattern: $_IT.lastIndexOf($$$_A)
+      - pattern: $_IT.sort($$$_A)
+
+rule:
+  all:
+    - matches: est-un-parcours
+    - has:
+        stopBy: end
+        matches: est-un-parcours

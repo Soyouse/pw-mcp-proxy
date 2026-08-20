@@ -25,12 +25,10 @@
 //    en revue, pas en éditant la baseline.
 
 import { test, expect } from 'vitest';
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { RACINE as ROOT, scanRegle, invaliderCacheAstGrep, parBasename } from './ast-grep.js';
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RULE = path.join(ROOT, 'rules', 'no-undeclared-timing.yml');
 
 // ── BASELINE : état MESURÉ le 01/08/2026 (ast-grep ET regex concordants : 2/1/4).
@@ -73,64 +71,14 @@ const BUDGET = {
 const CONST_OK = new Set(['budget.js', 'auto-restart.js']);
 const RX_CONST = /\b([A-Z][A-Z0-9_]*(?:_MS|_TIMEOUT|_TTL|_INTERVAL|_DELAY|_STALE|_RETRY)[A-Z0-9_]*)\s*=/g;
 
-function binAstGrep() {
-  const ext = process.platform === 'win32' ? '.cmd' : '';
-  const local = path.join(ROOT, 'node_modules', '.bin', `ast-grep${ext}`);
-  return fs.existsSync(local) ? local : `npx${ext}`;
-}
-
-/**
- * Détections réelles par fichier, via AST.
- *
- * ⚠️ `execFileSync` SYNCHRONE et non `harness.spawnTracked` : le harnais protège des process
- *    qui SURVIVENT au test (serveurs, navigateurs). Ici le process est terminé quand la
- *    fonction rend la main — fuite impossible par construction. Exception justifiée, pas un oubli.
- * ⚠️ ast-grep sort en code NON-ZÉRO dès qu'il TROUVE une occurrence (comportement normal d'un
- *    linter avec `severity: error`). NE PAS traiter ça comme un échec : le JSON attendu est
- *    dans `err.stdout`. Sans ce catch, le gate échoue toujours — y compris quand tout va bien.
- */
-// ⚠️ CACHE PAR RÈGLE — OBLIGATOIRE, ne pas retirer. Chaque test appelait son propre scan : avec
-// 2 règles × 5 tests, ça faisait 6 spawns d'ast-grep par run. Le code source ne change pas PENDANT
-// le run, donc 5 de ces scans étaient du gaspillage pur — et sur une machine chargée ils suffisaient
-// à faire déborder les attentes des tests réseau voisins (mesuré 02/08 : http-transport.test.js
-// vert seul en 183 ms, ROUGE en suite à 18 s). Un gate ne doit jamais coûter assez cher pour
-// faire rougir un AUTRE test : une suite qui rougit au hasard est une suite qu'on cesse de lire.
-// `_invalider()` existe pour les negative-checks, qui eux modifient src/ en cours de run.
-const _cache = new Map();
-function _invalider() { _cache.clear(); }
-
-// ⚠️ Règle passée en PARAMÈTRE (un fichier YAML), jamais un pattern en argv : sur Windows
-// l'invocation passe par cmd.exe qui découperait le pattern à l'espace (piège mesuré le 02/08).
-function scanRule(rule) {
-  if (_cache.has(rule)) return _cache.get(rule);
-  const res = _scanRuleUncached(rule);
-  _cache.set(rule, res);
-  return res;
-}
-
-function _scanRuleUncached(rule) {
-  const bin = binAstGrep();
-  const base = bin.startsWith('npx') ? ['ast-grep'] : [];
-  const opts = {
-    cwd: ROOT,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-    shell: process.platform === 'win32',
-  };
-  let out;
-  try {
-    out = execFileSync(bin, [...base, 'scan', '-r', rule, 'src', '--json=compact'], opts);
-  } catch (err) {
-    if (typeof err.stdout !== 'string') throw err; // vrai échec (binaire absent, règle invalide)
-    out = err.stdout;
-  }
-  const par = {};
-  for (const m of JSON.parse(out || '[]')) {
-    const f = String(m.file).split(/[/\\]/).pop();
-    par[f] = (par[f] || 0) + 1;
-  }
-  return par;
-}
+// ⚠️ L'INVOCATION d'ast-grep vit dans `tests/ast-grep.js` — SOURCE UNIQUE, partagée avec
+//    `quadratique-gate.test.js` (extraite le 20/08/2026, quand ce code a eu un 2ᵉ consommateur).
+//    🛑 NE JAMAIS en recopier une variante ici : ce code porte 4 pièges (code de sortie non-zéro
+//    NORMAL, shell Windows, binaire local, cache par règle) et deux copies divergeraient au
+//    premier piège corrigé d'un seul côté — le gate resté en arrière devenant creux SANS rougir.
+//    Le cache et son invalidation (pour les negative-checks) viennent de là aussi.
+const scanRule = (rule) => parBasename(scanRegle(rule, ['src']));
+const _invalider = invaliderCacheAstGrep;
 
 // ═══ VOLET 2 : le RAISONNEMENT temporel (`now - t > seuil`) ═══════════════════════════════════
 //
