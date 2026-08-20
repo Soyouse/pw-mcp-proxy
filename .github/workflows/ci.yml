@@ -43,6 +43,22 @@ jobs:
   mutation:
     name: Gate mutation (Stryker, break=94)
     runs-on: ubuntu-latest
+    # 🛑 BORNE OBLIGATOIRE — UN GATE QUI NE REND PAS DE VERDICT NE PROTEGE RIEN.
+    # MESURE 20/08/2026 : TOUS les runs du 03/08 au 20/08 ont dure 46 a 51 min et se sont termines
+    # par « The hosted runner lost communication with the server ». Signature relevee sur le job
+    # 96373135403 : `npm run test:mut` demarre a 09:05:11 et reste `in_progress` / `conclusion:null`
+    # jusqu'a la mort du runner a 09:51 — AUCUN step en echec, et surtout AUCUN LOG UPLOADE (un
+    # runner qui perd la communication n'envoie rien). Le gate etait donc rouge en permanence ET
+    # MUET : impossible de savoir pourquoi, donc destine a etre ignore puis contourne.
+    # ⚠️ SANS CETTE LIGNE, LE DEFAUT EST `timeout-minutes: 360` (doc GitHub Actions) = 6 h de silence.
+    # ⚠️ CE N'EST PAS UN ASSOUPLISSEMENT — c'est l'inverse : un depassement de `timeout-minutes` est
+    # annule PAR GITHUB (pas par le runner), donc le job est marque ECHEC **et ses logs SONT
+    # uploades**. La borne transforme une panne muette en verdict lisible. NE JAMAIS la remplacer
+    # par `continue-on-error` : ce serait rendre le job vert en le neutralisant.
+    # ⚠️ VALEUR ANCREE SUR UNE MESURE, jamais un chiffre rond de confort : run SAIN = **2 min 01 s**
+    # (run 30772241326, 02/08/2026, meme workflow, meme absence de cache, 715 mutants). 10 min = 5x
+    # cette reference. Au-dela, ce n'est plus de la lenteur : c'est une panne, et elle doit le DIRE.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -50,7 +66,34 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # ⚠️ CACHE INCREMENTAL STRYKER — `restore` ET `save` SEPARES, et `save` en `if: always()`.
+      # 🛑 LA FORME COMBINEE `actions/cache@v4` NE SAUVE QU'EN CAS DE SUCCES DU JOB (son post-step
+      # est saute quand le job echoue). Or CE job echoue par construction des que le score passe
+      # sous le plancher : avec la forme combinee, le cache ne serait JAMAIS peuple, et chaque run
+      # re-muterait les 715 mutants a partir de zero. Le couple restore/save est la SEULE forme qui
+      # peuple le cache d'un job qui a le droit de rougir. NE PAS « simplifier » en cache@v4.
+      # ⚠️ Un fichier incremental issu d'un run ROUGE reste VALIDE : il indexe les resultats par HASH
+      # de fichier, jamais par verdict. Stryker reinvalide seul ce que le contenu a change => un vert
+      # incremental n'est jamais un vert perime, et un rouge cache ne se propage pas.
+      # 🛑 NE JAMAIS `rm` ce fichier pour forcer un run complet : `stryker run --force` le RECONSTRUIT,
+      # `rm` le DETRUIT (et coute a tous les runs suivants).
+      # ⚠️ Cle par SHA + `restore-keys` par prefixe : chaque run repart du dernier etat connu et en
+      # depose un nouveau (une cle deja ecrite est immuable chez GitHub). L'EVICTION est celle du
+      # store GitHub (7 jours d'inactivite / 10 Go par depot), jamais un nettoyage maison.
+      - name: Restaurer le fichier incremental Stryker
+        uses: actions/cache/restore@v4
+        with:
+          path: reports/stryker-incremental.json
+          key: stryker-incremental-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            stryker-incremental-${{ runner.os }}-
       - run: npm run test:mut
+      - name: Sauvegarder le fichier incremental Stryker
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: reports/stryker-incremental.json
+          key: stryker-incremental-${{ runner.os }}-${{ github.sha }}
 
   # 🛑 GATE TLA+/TLC SUPPRIME le 03/08/2026 — AVEC le verrou fichier qu'il prouvait.
   # Il appelait `npm run test:spec` sur `spec/SupervisorLock.tla`, disparus a l'amputation du
