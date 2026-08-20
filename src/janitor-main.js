@@ -239,6 +239,33 @@ async function principal() {
   else if (daemon) log('[concierge] daemon vivant — rien a faire (cas nominal)');
 }
 
+// 🛑 GARDE DE POINT D'ENTRÉE — NE JAMAIS RETIRER, NE JAMAIS « SIMPLIFIER ».
+//
+// ⚠️ CE MODULE EXÉCUTE UNE PASSE DE CONCIERGE, C'EST-À-DIRE `listProcesses()` PUIS
+// `treeKill()` — donc `process.kill(-pid, 'SIGKILL')`, UN SIGNAL À TOUT UN GROUPE DE
+// PROCESSUS. Sans la garde ci-dessous, un simple `import` suffisait à le déclencher.
+//
+// 🔴 CE QUE ÇA A COÛTÉ (mesuré le 20/08/2026, cause du gate de mutation ROUGE depuis le 03/08) :
+// `tests/janitor.test.js` importe ce fichier pour `planInstallation`. L'`await` de top-level
+// s'exécutait donc À CHAQUE CHARGEMENT DU FICHIER DE TEST — et Stryker recharge l'environnement
+// de test pour ses mutants. En CI, AUCUN daemon n'écoute ⇒ `daemonVivant` rend `false` ⇒ on
+// tombait dans la branche DESTRUCTRICE (énumération + kill de groupe), sur le runner GitHub
+// lui-même. Signature : « The hosted runner lost communication with the server », 46 à 51 min,
+// AUCUN step en échec, AUCUN log téléversé. Le job n'a plus jamais rendu de verdict.
+// ⚠️ INVISIBLE SUR LE POSTE DE DEV, ET C'EST LE PIÈGE : là-bas un daemon RÉEL écoute, donc
+// `daemonVivant` rend `true` et la passe sort par la branche inoffensive (`return []`). Le test
+// local imprime d'ailleurs « [concierge] daemon vivant — rien a faire » : la preuve que la passe
+// tournait bel et bien pendant les tests, sous les yeux de tous, sans conséquence visible ICI.
+// ⇒ La reproductibilité locale n'a JAMAIS été une preuve d'innocuité pour ce fichier.
+//
+// ⚠️ On compare à `MOI` (déjà dérivé de `import.meta.url`), jamais à une chaîne écrite à la main :
+// l'adresse d'un composant se MESURE. `import` ⇒ `process.argv[1]` est l'exécutable appelant
+// (vitest, node -e, un autre module) ⇒ la garde est FAUSSE ⇒ rien ne s'exécute. C'est fails-closed :
+// dans le doute, le concierge ne tue pas.
+const EST_POINT_D_ENTREE = !!process.argv[1] && path.resolve(process.argv[1]) === path.resolve(MOI);
+
 // ⚠️ `await` de TOP-LEVEL sous try/catch (règle du dépôt) : une exception y avorte le module et le
 // process meurt SANS RIEN JOURNALISER — `uncaughtException` ne la voit pas.
-try { await principal(); } catch (e) { log('concierge FATAL: ' + describeError(e) + ' | ' + stackOf(e)); process.exitCode = 1; }
+if (EST_POINT_D_ENTREE) {
+  try { await principal(); } catch (e) { log('concierge FATAL: ' + describeError(e) + ' | ' + stackOf(e)); process.exitCode = 1; }
+}
