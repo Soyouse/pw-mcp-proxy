@@ -118,10 +118,20 @@ jobs:
       # pour ce job, pas meme pour les steps termines dans les 20 premieres secondes).
       # ⚠️ `exit $code` PRESERVE LE VERDICT : un depassement sort en 124, un score sous le plancher
       # garde le code de Stryker. On ne troque JAMAIS le rouge contre du confort de diagnostic.
+      # 🔬 MESURE EN COURS — `--concurrency 1` (20/08/2026). Trois runs bornes (32357523205,
+      # 32358951280, 32360362878) ont montre que le runner cesse de repondre AVANT meme que la
+      # borne interne `timeout` ne se declenche : ni le `timeout`, ni la redirection vers fichier
+      # n'ont termine le step, et le zip du run ne contient ZERO octet pour ce job — pas meme les
+      # steps deja termines en succes. Le gel est donc au niveau du RUNNER, pas du shell.
+      # ⇒ Hypothese testee ici, et c'est la premiere prescrite par la doctrine du parc pour cette
+      # signature (`ETIMEDOUT` child-process-proxy = RAM insuffisante) : epuisement de ressources a
+      # `concurrency: 3` sur un runner 4 vCPU. On descend a 1 pour SAVOIR, pas pour aller plus vite.
+      # ⚠️ `stryker.conf.json` reste a 3 (poste de dev) : seule la CI est surchargee, et le drapeau
+      # est DECLARE ici plutot que dilue dans la config partagee.
       - name: Gate mutation (borne DANS le runner, sortie vers FICHIER)
         run: |
           set +e
-          timeout --verbose --signal=TERM --kill-after=30s 6m npm run test:mut > mutation.log 2>&1
+          timeout --verbose --signal=TERM --kill-after=30s 6m npm run test:mut -- --concurrency 1 > mutation.log 2>&1
           code=$?
           set -e
           echo "::group::sortie Stryker (code de sortie: $code ; 124 = borne atteinte)"
