@@ -18,13 +18,24 @@
 // n'existe AUCUN message « je suis toujours là » ni « je m'en vais » dans ce protocole :
 // les inventer, ce serait réintroduire l'inférence qu'on supprime.
 //
-//   proxy → daemon   { op: 'acquire', profile, spec }   UNE fois, à l'ouverture
-//   daemon → proxy   { ok: true,  url }                 le serveur est PRÊT (fait, pas promesse)
-//   daemon → proxy   { ok: false, erreur }              échec NOMMÉ (jamais un silence)
-//   fermeture socket                                    = « je n'utilise plus ce profil »
+//   proxy → daemon   { op: 'acquire', profile, spec, instance? }   UNE fois, à l'ouverture
+//   daemon → proxy   { ok: true,  url, instanceId }                le serveur est PRÊT (fait, pas promesse)
+//   daemon → proxy   { ok: false, erreur }                         échec NOMMÉ (jamais un silence)
+//   fermeture socket                                               = « je n'utilise plus cette instance »
+//
+// ── DEPUIS LE 05/09/2026 : UNE INSTANCE PAR CLIENT, PLUS DE SERVEUR PARTAGÉ ───────────────────
+// `instance` (optionnel) décrit une IDENTITÉ à matérialiser : le daemon copie son snapshot dans
+// un dossier NEUF, y lance UN serveur pour CE client, et rend l'`instanceId`. Deux clients de la
+// même identité obtiennent DEUX instances (mesuré 04/09 : un serveur partagé = les agents
+// s'écrasent la page). Sans `instance` (profil v1 `userDataDir` ou `--isolated`), la spec porte
+// déjà tout ce qu'il faut et le daemon lance le serveur tel quel — toujours un par client.
+// ⚠️ Un daemon ANCIEN répondrait `{ok:true,url}` sans `instanceId` : `lireReponse` le REFUSE
+// (fails-closed, motif nommé) — un proxy neuf ne s'accroche jamais à un daemon qui partagerait.
 //
 // Fonctions TOTALES : elles ne throw JAMAIS. Un message malformé rend un refus explicite, jamais
 // une exception — le daemon sert N clients, l'un d'eux ne doit pas pouvoir le faire tomber.
+
+import { STRATEGIES, nomIdentiteValide } from './identity-store-pure.js';
 
 /** Opérations acceptées. Une seule aujourd'hui : le protocole minimal qui suffit. */
 export const OPS = Object.freeze(['acquire']);
@@ -33,22 +44,55 @@ export const OPS = Object.freeze(['acquire']);
  * Construit la requête d'un proxy. `spec` est la ligne de commande du serveur (cf `spec.js`) :
  * c'est le proxy qui la calcule, le daemon ne fait que l'exécuter — il n'a AUCUNE connaissance
  * de `profiles.json`, donc rien à recharger, rien à synchroniser.
+ * `instance` (optionnel) = `{identite, strategie, persist, storeDir, instancesDir, plafonds?}` :
+ * tout ce que le daemon doit savoir pour matérialiser l'identité, PASSÉ par le proxy (même règle :
+ * le daemon ne lit aucune config).
  */
-export function requeteAcquire(profile, spec) {
-  return { op: 'acquire', profile, spec };
+export function requeteAcquire(profile, spec, instance = null, token = null) {
+  const m = { op: 'acquire', profile, spec };
+  if (instance) m.instance = instance;
+  // `token` (05/09/2026) : SEULEMENT sur un canal RÉSEAU (nœud distant). Le tuyau local est
+  // protégé par l'OS (même utilisateur) ; un canal TCP ne l'est par rien d'autre que ce jeton.
+  if (typeof token === 'string' && token.length > 0) m.token = token;
+  return m;
 }
 
-export function reponseOk(url) {
-  return { ok: true, url };
+export function reponseOk(url, instanceId) {
+  return { ok: true, url, instanceId };
 }
 
 export function reponseErreur(erreur) {
   return { ok: false, erreur: String(erreur ?? 'erreur inconnue') };
 }
 
+// Valide la description d'instance. Rend `{ok:true, instance}` (copie STRICTE, rien en contrebande)
+// ou `{ok:false, raison}`. ⚠️ Le daemon COPIE et EFFACE des dossiers à partir de ces données :
+// `storeDir`/`instancesDir` non-string ou vides, un nom d'identité hors alphabet (`../x`), et on
+// écrirait hors du coffre. Chaque garde nomme SON motif.
+function validerInstance(inst) {
+  if (!inst || typeof inst !== 'object' || Array.isArray(inst)) return { ok: false, raison: 'instance non-objet' };
+  if (!nomIdentiteValide(inst.identite)) return { ok: false, raison: `instance.identite invalide: ${String(inst.identite)}` };
+  if (!STRATEGIES.includes(inst.strategie)) return { ok: false, raison: `instance.strategie hors liste: ${String(inst.strategie)}` };
+  if (typeof inst.persist !== 'boolean') return { ok: false, raison: 'instance.persist doit être un booléen' };
+  if (typeof inst.storeDir !== 'string' || inst.storeDir.length === 0) return { ok: false, raison: 'instance.storeDir absent ou vide' };
+  if (typeof inst.instancesDir !== 'string' || inst.instancesDir.length === 0) return { ok: false, raison: 'instance.instancesDir absent ou vide' };
+  const plafonds = inst.plafonds && typeof inst.plafonds === 'object' && !Array.isArray(inst.plafonds) ? { ...inst.plafonds } : {};
+  return {
+    ok: true,
+    instance: {
+      identite: inst.identite,
+      strategie: inst.strategie,
+      persist: inst.persist,
+      storeDir: inst.storeDir,
+      instancesDir: inst.instancesDir,
+      plafonds,
+    },
+  };
+}
+
 /**
- * Valide une requête reçue par le DAEMON. Rend `{valide:true, profile, spec}` ou
- * `{valide:false, raison}`.
+ * Valide une requête reçue par le DAEMON. Rend `{valide:true, profile, spec, instance}` ou
+ * `{valide:false, raison}`. `instance` vaut `null` quand la requête n'en porte pas.
  *
  * ⚠️ Le daemon lance des PROCESSUS à partir de ces données : la validation est une frontière de
  * sécurité, pas une politesse. Un `profile` vide ou non-string, une `spec` sans `command`, et on
@@ -63,20 +107,32 @@ export function validerRequete(msg) {
   if (typeof spec.command !== 'string' || spec.command.length === 0) return { valide: false, raison: 'spec.command absente' };
   if (!Array.isArray(spec.args)) return { valide: false, raison: 'spec.args doit être un tableau' };
   if (!spec.args.every((a) => typeof a === 'string')) return { valide: false, raison: 'spec.args doit ne contenir que des chaînes' };
-  return { valide: true, profile: msg.profile, spec: { command: spec.command, args: spec.args } };
+  let instance = null;
+  if (msg.instance !== undefined && msg.instance !== null) {
+    const v = validerInstance(msg.instance);
+    if (!v.ok) return { valide: false, raison: v.raison };
+    instance = v.instance;
+  }
+  const token = typeof msg.token === 'string' && msg.token.length > 0 ? msg.token : null;
+  return { valide: true, profile: msg.profile, spec: { command: spec.command, args: spec.args }, instance, token };
 }
 
 /**
- * Lit une réponse reçue par le PROXY. Rend `{ok:true, url}` ou `{ok:false, erreur}`.
+ * Lit une réponse reçue par le PROXY. Rend `{ok:true, url, instanceId}` ou `{ok:false, erreur}`.
  *
  * ⚠️ Une réponse `ok` SANS url est traitée comme une ERREUR, pas comme un succès vide : le proxy
  * s'en servirait pour construire `http://undefined/...`. Fails-closed.
+ * ⚠️ Une réponse `ok` SANS instanceId vient d'un daemon ANCIEN (serveur PARTAGÉ) : REFUSÉE avec
+ * le geste à faire — jamais acceptée « pour compatibilité », ce serait rejouer la collision du 03/09.
  */
 export function lireReponse(msg) {
   if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return reponseErreur('réponse non-objet');
   if (msg.ok === true) {
     if (typeof msg.url !== 'string' || msg.url.length === 0) return reponseErreur('réponse ok mais url absente');
-    return { ok: true, url: msg.url };
+    if (typeof msg.instanceId !== 'string' || msg.instanceId.length === 0) {
+      return reponseErreur('réponse ok mais instanceId absent : daemon PÉRIMÉ (serveur partagé) — arrêtez l\'ancien daemon, le prochain acquire en relance un neuf');
+    }
+    return { ok: true, url: msg.url, instanceId: msg.instanceId };
   }
   return reponseErreur(msg.erreur ?? 'réponse sans succès ni motif');
 }
@@ -103,10 +159,10 @@ export function lireLimite(valeur) {
 }
 
 /**
- * Reste-t-il de la place pour un profil SUPPLÉMENTAIRE ?
- * ⚠️ Ne concerne QUE la création d'un nouveau profil : rejoindre un profil déjà servi est toujours
- * autorisé (c'est du PARTAGE, ça ne coûte aucun navigateur de plus).
+ * Reste-t-il de la place pour une INSTANCE supplémentaire ?
+ * Depuis le 05/09/2026 chaque client a son instance (un Chrome chacun) : la limite compte des
+ * instances vivantes, c'est-à-dire des navigateurs — exactement ce que `maxBrowsers` promet.
  */
-export function placeDisponible(nbProfilsActifs, limite) {
-  return limite === null || nbProfilsActifs < limite;
+export function placeDisponible(nbInstancesActives, limite) {
+  return limite === null || nbInstancesActives < limite;
 }

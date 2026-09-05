@@ -1,32 +1,38 @@
 {
-  "_lisez_moi": "INSTANTANE DATE des surfaces TIERCES dont pw-mcp-proxy depend. Compare au binaire reel par tests/contract-snapshot.test.js. NE PAS editer a la main pour faire passer un test : re-capturer, RELIRE les diffs, puis mettre a jour le skill playwright-mcp-api ET le BACKLOG dans le meme geste.",
+  "_lisez_moi": "INSTANTANE DATE des surfaces TIERCES dont pw-mcp-proxy depend. Compare au binaire reel par tests/contract-snapshot.test.js. NE PAS editer a la main pour faire passer un test : re-capturer (tools/capture-contrat.mjs), RELIRE les diffs, puis mettre a jour le skill playwright-mcp-api ET le BACKLOG dans le meme geste.",
   "package": "@playwright/mcp",
-  "version": "0.0.78",
-  "distTagLatestAuMomentDuSnapshot": "0.0.78",
-  "capturePar": "npx -y @playwright/mcp@0.0.78 --help",
-  "captureLe": "2026-08-02",
+  "version": "0.0.80",
+  "distTagLatestAuMomentDuSnapshot": "0.0.80",
+  "capturePar": "npx -y @playwright/mcp@0.0.80 --help",
+  "captureLe": "2026-09-04",
   "requis": {
-    "_pourquoi": "Flags que le CODE construit reellement (src/spec.js, src/supervisor.js). La disparition de l'UN d'eux casse le proxy en PRODUCTION => ROUGE FATAL.",
+    "_pourquoi": "Flags que le CODE construit reellement (src/spec.js, src/manager.js). La disparition de l'UN d'eux casse le proxy en PRODUCTION => ROUGE FATAL.",
     "flags": [
       "--caps",
       "--host",
       "--isolated",
       "--port",
-      "--shared-browser-context",
+      "--proxy-server",
       "--user-data-dir"
     ]
   },
-  "absents": {
-    "_pourquoi": "Capacites VERIFIEES ABSENTES le 02/08. Leur APPARITION est une BONNE nouvelle qui doit remonter : un auto-shutdown natif rendrait le daemon maison INUTILE (cf skill playwright-mcp-api, alternatives epuisees). Le test rougit alors pour signaler une OPPORTUNITE DE SIMPLIFIER, jamais une panne.",
+  "interdits": {
+    "_pourquoi": "Flag présent dans le --help mais dont la PRÉSENCE dans une spec du proxy est une régression : deux clients HTTP partageant un même contexte navigateur (--shared-browser-context) s'écrasent mutuellement la page (collision mesurée le 04/09/2026, scène du 03/09 rejouée). Le parallélisme multi-agent passe désormais par une instance par client, jamais par un contexte partagé.",
     "flags": [
-      "--idle-timeout",
-      "--shutdown-when-idle",
+      "--shared-browser-context"
+    ]
+  },
+  "absents": {
+    "_pourquoi": "Capacites VERIFIEES ABSENTES au moment du snapshot. Leur APPARITION est une BONNE nouvelle qui doit remonter : un auto-shutdown natif rendrait le daemon maison INUTILE (cf skill playwright-mcp-api, alternatives epuisees). Le test rougit alors pour signaler une OPPORTUNITE DE SIMPLIFIER, jamais une panne.",
+    "flags": [
       "--auto-shutdown",
-      "--exit-when-idle"
+      "--exit-when-idle",
+      "--idle-timeout",
+      "--shutdown-when-idle"
     ]
   },
   "surfaceComplete": {
-    "_pourquoi": "Tous les flags au moment du snapshot. Divergence = l'upstream a bouge => relire les diffs AVANT de deployer. Sur une version PINNEE ce test ne peut rougir qu'au BUMP : exactement le moment ou l'on veut etre alerte.",
+    "_pourquoi": "Tous les flags au moment du snapshot. Divergence = l'upstream a bouge => relire les diffs AVANT de deployer. Sur une version PINNEE ce test ne peut rougir qu au BUMP : exactement le moment ou l'on veut etre alerte.",
     "flags": [
       "--allow-unrestricted-file-access",
       "--allowed-hosts",
@@ -58,7 +64,6 @@
       "--no-sandbox",
       "--output-dir",
       "--output-max-size",
-      "--output-mode",
       "--port",
       "--proxy-bypass",
       "--proxy-server",
@@ -66,11 +71,13 @@
       "--save-session",
       "--secrets",
       "--shared-browser-context",
+      "--snapshot-boxes",
       "--snapshot-mode",
       "--storage-state",
       "--test-id-attribute",
       "--timeout-action",
       "--timeout-navigation",
+      "--timeout-settle",
       "--user-agent",
       "--user-data-dir",
       "--version",

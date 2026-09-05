@@ -101,25 +101,26 @@ test('S5 : un agent se termine, les AUTRES continuent sans interruption', async 
   const agentA = nouvelAgent();
   const agentB = nouvelAgent();
 
-  // Deux agents utilisent le même profil : le second ADOPTE le serveur du premier.
+  // Deux agents utilisent le même profil : depuis le 05/09/2026 chacun a SON instance (mesuré
+  // le 04/09 : un serveur partagé fait qu'un agent écrase la page de l'autre).
   const urlA = await agentUtilise(agentA, p);
   const urlB = await agentUtilise(agentB, p);
-  expect(urlB, 'les deux agents parlent au MÊME serveur (jamais un 2e navigateur)').toBe(urlA);
-  const u = new URL(urlA);
-  const pid = pidDuPort(u.port);
-  expect(pid, 'préalable : un process sert bien ce port').toBeTruthy();
+  expect(urlB, 'deux agents = deux serveurs (jamais le même onglet)').not.toBe(urlA);
+  const uA = new URL(urlA);
+  const uB = new URL(urlB);
+  const pidA = pidDuPort(uA.port);
+  const pidB = pidDuPort(uB.port);
+  expect(pidA && pidB, 'préalable : un process sert bien chaque port').toBeTruthy();
 
   // L'agent A s'en va (fin de session Claude, fermeture d'onglet, crash de sa fenêtre…).
   agentPart(agentA);
+  // Son instance est rangée : le daemon tue SON serveur (fait du noyau, on le constate).
+  expect(await jusqua(async () => !isPidAlive(pidA)), 'le serveur de A est arrêté').toBe(true);
 
   // ⚠️ C'est PRÉCISÉMENT le moment où un mécanisme trop zélé tuerait le serveur de B.
   // B n'a rien demandé et ne doit RIEN subir.
-  expect(await repond(u.hostname, Number(u.port)), 'S5 VIOLÉ : le départ de A a coupé le navigateur de B').toBe(true);
-  expect(isPidAlive(pid), 'le process du serveur est toujours vivant').toBe(true);
-
-  // Et B doit pouvoir continuer à travailler : re-demander le profil ne respawn rien.
-  const urlB2 = await agentUtilise(agentB, p);
-  expect(urlB2, 'B retrouve SON serveur, aucun redémarrage').toBe(urlA);
+  expect(await repond(uB.hostname, Number(uB.port)), 'S5 VIOLÉ : le départ de A a coupé le navigateur de B').toBe(true);
+  expect(isPidAlive(pidB), 'le process du serveur de B est toujours vivant').toBe(true);
 }, 60000);
 
 test('S6 : le DERNIER client parti, le serveur s arrête (zéro process qui traîne)', async () => {
@@ -127,24 +128,29 @@ test('S6 : le DERNIER client parti, le serveur s arrête (zéro process qui tra�
   const agentA = nouvelAgent();
   const agentB = nouvelAgent();
 
-  const url = await agentUtilise(agentA, p);
-  await agentUtilise(agentB, p);
-  const u = new URL(url);
-  const pid = pidDuPort(u.port);
-  expect(await repond(u.hostname, Number(u.port)), 'préalable : le serveur répond').toBe(true);
+  const urlA = await agentUtilise(agentA, p);
+  const urlB = await agentUtilise(agentB, p);
+  const uA = new URL(urlA);
+  const uB = new URL(urlB);
+  const pidA = pidDuPort(uA.port);
+  const pidB = pidDuPort(uB.port);
+  expect(await repond(uA.hostname, Number(uA.port)), 'préalable : le serveur de A répond').toBe(true);
+  expect(await repond(uB.hostname, Number(uB.port)), 'préalable : le serveur de B répond').toBe(true);
 
   // Les DEUX agents s'en vont. Plus personne n'a besoin de ce profil.
   agentPart(agentA);
   agentPart(agentB);
 
   // ⚠️ Aucun tiers n'a rien à déclencher : plus de reaper, plus de passe, plus d'horloge à avancer.
-  // On attend seulement que le daemon reçoive du noyau la fermeture de la dernière socket.
-  const arrete = await jusqua(async () => !isPidAlive(pid));
-  expect(arrete, 'S6 VIOLÉ : le serveur survit alors que plus AUCUN client ne l utilise — fuite de navigateur').toBe(true);
+  // On attend seulement que le daemon reçoive du noyau la fermeture de chaque socket.
+  const arreteA = await jusqua(async () => !isPidAlive(pidA));
+  const arreteB = await jusqua(async () => !isPidAlive(pidB));
+  expect(arreteA && arreteB, 'S6 VIOLÉ : un serveur survit alors que plus AUCUN client ne l utilise — fuite de navigateur').toBe(true);
   // ⚠️ Le port se libère APRÈS la mort du process (le noyau démonte la socket d'écoute), pas au
   // même instant. On RE-MESURE, borné : une vraie fuite resterait donc ROUGE au bout du budget.
-  const libere = await jusqua(async () => !(await repond(u.hostname, Number(u.port))));
-  expect(libere, 'le port est libéré').toBe(true);
+  const libereA = await jusqua(async () => !(await repond(uA.hostname, Number(uA.port))));
+  const libereB = await jusqua(async () => !(await repond(uB.hostname, Number(uB.port))));
+  expect(libereA && libereB, 'les ports sont libérés').toBe(true);
 }, 60000);
 
 // ⚠️ ANTI-RÉGRESSION « la charge n'est pas une panne » (refonte 02/08, objection de Théo).

@@ -7,14 +7,30 @@ repository. Do not open a public issue for anything exploitable.
 
 ## Threat model — what this proxy is, and is not
 
-`pw-mcp-proxy` multiplexes several MCP clients onto shared [`@playwright/mcp`](https://github.com/microsoft/playwright-mcp)
-servers on **one machine, for one user**. Everything it opens is local:
+`pw-mcp-proxy` gives each MCP client its own [`@playwright/mcp`](https://github.com/microsoft/playwright-mcp)
+server on **one machine, for one user**. Everything it opens is local:
 
-- **HTTP servers bind `localhost` only** — never `0.0.0.0`. `@playwright/mcp` additionally validates
+- **HTTP servers bind `localhost` by default** — never `0.0.0.0`. `@playwright/mcp` additionally validates
   the `Host` header (anti DNS-rebinding), which is why clients must use `http://localhost:<port>/mcp`
-  and never `http://127.0.0.1:<port>/mcp` (that returns `403`).
+  and never `http://127.0.0.1:<port>/mcp` (that returns `403`). An optional `bindHost` exists for the
+  Windows loopback quirk (libuv does not retransmit SYNs to 127.x); it is validated by
+  `bind-host-pure.js` and **can never be a routable address** (public or Tailscale ranges are refused;
+  a private address requires naming the dedicated adapter in `bindHostInterface`, and the address must
+  really be on it). The servers have no authentication: binding them to a reachable address would
+  hand a logged-in browser to the network.
+- **The identity store (`identityStore.dir`, default `~/.pw-identities`) holds live logins** — snapshots
+  of Chrome user data directories (cookies, local storage, session keys). It is a secret on disk,
+  protected only by your OS user permissions; it is never encrypted by this project (declared
+  limitation) and must never enter a repository, a backup you share, or a bug report. Instance
+  directories (`instances.dir`, temporary) are deleted when their client leaves.
 - **The daemon channel is a named pipe (Windows) or a Unix domain socket**, scoped to the current
-  user. It is not reachable from the network.
+  user. It is not reachable from the network. **Remote node mode** (`daemon-main --listen tcp://… --token-file …`,
+  2026-09-05): the daemon may listen on TCP for another machine, and then **requires a token on every
+  request** (read from a file, never from argv; constant-time comparison; refusing to start without one).
+  The browser servers it spawns bind the same address **without authentication**: only ever expose a
+  node on a private overlay you control (Tailscale), never on a public address. Node-local settings
+  (Chrome `--no-sandbox` under root, identity store paths) currently travel from the client — see the
+  BACKLOG finding before running identities on a remote node.
 - **There is no authentication** on the local endpoints, by design: they are same-user, same-host.
   Anything already running as your user can reach them — the same trust boundary as your shell.
 

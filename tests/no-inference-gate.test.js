@@ -46,6 +46,28 @@ const BUDGET = {
     motif: 'distant',
     pourquoi: 'I/O réseau : le pair est hors de portée du noyau local, aucune autorité à interroger.',
   },
+  // Posé le 05/09/2026 avec `attendreLibre` : Chrome est un PETIT-ENFANT du daemon — sa mort n'est
+  // délivrée par AUCUN événement (pas notre enfant, doc Node), et sous Windows ses fichiers restent
+  // verrouillés jusqu'à sa disparition. Le seul fait observable est un `rename` qui réussit ; on
+  // l'OBSERVE à période fixe. Budget = filet (un kill réussi finit par libérer), dépassé ⇒ on crie.
+  'identity-store.js': {
+    max: 1,
+    motif: 'distant',
+    pourquoi:
+      "libération du dossier d'instance : Chrome (petit-enfant) ne nous notifie jamais sa fin et " +
+      "tient ses fichiers sous Windows — aucune autorité joignable, on observe le rename qui réussit.",
+  },
+  // Posé le 05/09/2026 avec `surveillerConfig` : le rechargement de profiles.json est passé de
+  // `fs.watchFile` (sondage à vie) à `fs.watch` (ÉVÉNEMENT du noyau). Le seul délai restant = le rejeu
+  // de LECTURE quand un antivirus/indexeur tient le fichier (EBUSY/EPERM) : aucune autorité locale ne
+  // dit quand il le rendra. Calendrier borné (budget.js), épuisé ⇒ ALERTE, jamais un silence.
+  'config-watch.js': {
+    max: 1,
+    motif: 'distant',
+    pourquoi:
+      "rejeu de lecture de profiles.json tenu par un autre process (antivirus, indexeur, renommage " +
+      "atomique en cours) — l'antivirus n'est pas interrogeable ; l'événement de l'OS, lui, est SANS délai.",
+  },
   // ⚠️ CLIQUET DESCENDU 4 → 3 le 02/08 : la readiness est partie dans readiness.js (source unique
   // partagée avec le daemon). Ne JAMAIS le remonter — un budget ne se relâche pas parce qu'on
   // réorganise le code.
@@ -103,6 +125,15 @@ const BUDGET_INFERENCE = {
     motif: 'indécidable',
     pourquoi:
       "borne de l'attente « vivant mais muet » — problème de l'arrêt, aucune observation ne tranche.",
+  },
+  // ⚠️ 1 comparaison : la borne de `attendreLibre` (05/09/2026). Le fait observé (rename qui réussit)
+  // est SANS délai ; la borne n'est qu'un FILET pour un dossier qu'aucun kill réussi n'a libéré — et
+  // au-delà on CRIE, on ne touche à rien.
+  'identity-store.js': {
+    max: 1,
+    motif: 'distant',
+    pourquoi:
+      'borne de l\'observation « le dossier d\'instance est-il libéré ? » — Chrome (petit-enfant) ne notifie jamais sa fin, aucune autorité joignable.',
   },
   // ⛔ `supervisor.js` RETIRÉ le 03/08 avec le fichier. Le verrou à péremption (LOCK_STALE_MS),
   // cause de la cascade de 5 h du 31/07, n'existe plus : le canal nommé rend le verrou périmé

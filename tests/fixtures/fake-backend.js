@@ -153,6 +153,8 @@ function handle(m) {
       { name: `ask_${TAG}`, description: `requete server->client ${TAG}`, inputSchema: { type: 'object' } },
     ];
     if (CAPS.includes('storage')) tools.push({ name: `storage_${TAG}`, description: `cap storage ${TAG}`, inputSchema: { type: 'object' } });
+    // `storage` est TOUJOURS ajoutee par le proxy (05/09/2026) : `pdf` est la cap qu'un test bascule pour observer un respawn.
+    if (CAPS.includes('pdf')) tools.push({ name: `pdf_${TAG}`, description: `cap pdf ${TAG}`, inputSchema: { type: 'object' } });
     if (COLLIDE) tools.push({ name: 'switch_profile', description: `tool backend homonyme ${TAG}`, inputSchema: { type: 'object' } });
     send({ jsonrpc: '2.0', id: m.id, result: { tools } });
     return;

@@ -18,9 +18,12 @@
 import fs from 'node:fs';
 import net from 'node:net';
 import process from 'node:process';
+import os from 'node:os';
+import path from 'node:path';
 import { daemonChannelName } from './channel-name.js';
 import { listProcesses, treeKill } from './prockill.js';
 import { victimesConcierge } from './janitor-pure.js';
+import { cheminsCoffre } from './identity-store-pure.js';
 import { log } from './logger.js';
 import { alert } from './notify.js';
 import { describeError } from './error-detail.js';
@@ -62,7 +65,11 @@ export function daemonVivant(canal) {
 export function uddDeLaConfig(cheminConfig) {
   try {
     const cfg = JSON.parse(fs.readFileSync(cheminConfig, 'utf8'));
-    return Object.values(cfg.profiles || {}).map((p) => p?.userDataDir).filter(Boolean);
+    const v1 = Object.values(cfg.profiles || {}).map((p) => p?.userDataDir).filter(Boolean);
+    // v2 (05/09/2026) : une INSTANCE tourne sous `instances.dir/<id>` (snapshot) ou sous le coffre
+    // lui-meme (`inplace`). Les deux PREFIXES sont a nous — meme source unique que le manager.
+    const { storeDir, instancesDir } = cheminsCoffre(cfg, { homedir: os.homedir(), tmpdir: os.tmpdir() }, path.join);
+    return [...v1, storeDir, instancesDir];
   } catch (e) {
     log(`[concierge] profiles.json illisible (${describeError(e)}) — aucun user-data-dir ciblé`);
     return [];
@@ -70,10 +77,47 @@ export function uddDeLaConfig(cheminConfig) {
 }
 
 /**
+ * Le dossier des instances, lu dans la config (`null` si illisible : on ne purge pas a l'aveugle).
+ */
+export function instancesDirDeLaConfig(cheminConfig) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(cheminConfig, 'utf8'));
+    return cheminsCoffre(cfg, { homedir: os.homedir(), tmpdir: os.tmpdir() }, path.join).instancesDir;
+  } catch (e) {
+    log(`[concierge] profiles.json illisible (${describeError(e)}) — aucun dossier d'instances ciblé`);
+    return null;
+  }
+}
+
+/**
+ * Supprime les dossiers d'INSTANCES orphelins. A n'appeler QUE daemon MORT (meme garde que les
+ * process) : une instance est JETABLE PAR DEFINITION — son client est parti avec le daemon, et
+ * son identite a ete rangee (ou perdue, mais un dossier orphelin ne la rendrait pas : Chrome
+ * n'y ecrit plus). Idempotent, ne throw jamais, rend les chemins supprimes.
+ * ⚠️ JAMAIS le coffre : une identite n'a pas de proprietaire vivant, c'est sa nature.
+ */
+export function purgerInstancesOrphelines(instancesDir) {
+  const supprimes = [];
+  if (!instancesDir) return supprimes;
+  let entrees;
+  try { entrees = fs.readdirSync(instancesDir, { withFileTypes: true }); } catch (e) {
+    if (e?.code !== 'ENOENT') log(`[concierge] instances illisibles (${describeError(e)})`);
+    return supprimes; // absent = rien a purger, c'est le cas sain
+  }
+  for (const e of entrees) {
+    if (!e.isDirectory()) continue;
+    const p = path.join(instancesDir, e.name);
+    try { fs.rmSync(p, { recursive: true, force: true }); supprimes.push(p); }
+    catch (err) { log(`[concierge] instance orpheline non supprimee ${p}: ${describeError(err)}`); }
+  }
+  return supprimes;
+}
+
+/**
  * UNE passe de concierge. Idempotente : rejouer sur une machine propre ne fait RIEN et ne coûte
  * qu'une énumération — condition pour qu'un déclencheur puisse tirer plusieurs fois sans dégât.
  * @param {{cheminConfig:string, env?:object}} opts
- * @returns {Promise<{daemon:boolean, tues:number[]}>}
+ * @returns {Promise<{daemon:boolean, tues:number[], dossiers:string[]}>}
  */
 export async function passeConcierge({ cheminConfig, env = {} }) {
   const canal = daemonChannelName(env);
@@ -81,7 +125,7 @@ export async function passeConcierge({ cheminConfig, env = {} }) {
   if (vivant) {
     // ⚠️ CAS NOMINAL, et il est SILENCIEUX : la machine travaille, il n'y a rien à nettoyer.
     // Journaliser ici noierait le signal (le concierge tire à chaque réveil et à chaque boot).
-    return { daemon: true, tues: [] };
+    return { daemon: true, tues: [], dossiers: [] };
   }
 
   const tues = victimesConcierge({
@@ -90,12 +134,14 @@ export async function passeConcierge({ cheminConfig, env = {} }) {
     uddNeedles: uddDeLaConfig(cheminConfig),
     selfPid: process.pid,
   });
-  if (!tues.length) return { daemon: false, tues: [] }; // rien à faire : silence, c'est le cas sain
+  // Process D'ABORD (un Chrome vivant tient ses fichiers), dossiers d'instances orphelins ENSUITE.
+  for (const pid of tues) { try { treeKill(pid); } catch (e) { log(`[concierge] kill ${pid}: ${describeError(e)}`); } }
+  const dossiers = purgerInstancesOrphelines(instancesDirDeLaConfig(cheminConfig));
+  if (!tues.length && !dossiers.length) return { daemon: false, tues: [], dossiers: [] }; // rien à faire : silence, c'est le cas sain
 
   // 🛑 ON CRIE. Un nettoyage muet ferait de ce fichier une boîte noire : l'utilisateur ne saurait
   // jamais que son système a dérivé, ni à quelle fréquence. Or c'est le compteur qui dira, au bout
   // des deux semaines de mesure, si le contrat tient. Le silence rendrait la mesure impossible.
-  for (const pid of tues) { try { treeKill(pid); } catch (e) { log(`[concierge] kill ${pid}: ${describeError(e)}`); } }
-  alert(`[concierge] AUCUN daemon vivant, ${tues.length} process sans propriétaire supprimé(s) (pid: ${tues.join(', ')})`);
-  return { daemon: false, tues };
+  alert(`[concierge] AUCUN daemon vivant, ${tues.length} process sans propriétaire supprimé(s) (pid: ${tues.join(', ')}), ${dossiers.length} dossier(s) d'instance orphelin(s) purgé(s)`);
+  return { daemon: false, tues, dossiers };
 }

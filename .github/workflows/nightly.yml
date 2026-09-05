@@ -32,10 +32,15 @@ jobs:
       - name: Extraire la version pinnée @playwright/mcp
         id: ver
         run: echo "v=$(node -e "console.log(require('./profiles.example.json').backend.args.at(-1).split('@').pop())")" >> "$GITHUB_OUTPUT"
-      - name: Installer Chromium (deps système incluses)
-        run: npx --yes playwright@latest install --with-deps chromium
-      - name: E2E LIVE (multi-agent réel + profil partagé)
+      - name: Installer Chrome (canal `chrome`, posture de prod) + un écran virtuel
+        # ⚠️ Le proxy pilote le VRAI Chrome (canal `chrome`, jamais Chromium) en FENÊTRE VISIBLE (jamais
+        # --headless : posture anti-détection). Sans écran, Xvfb fournit le display — exactement le
+        # provisioning d'un nœud VPS. La sentinelle de détectabilité (contract-live) en dépend.
+        run: |
+          npx --yes playwright@latest install --with-deps chrome
+          sudo apt-get update && sudo apt-get install -y xvfb
+      - name: E2E LIVE (une instance par agent, identité, heartbeat, sentinelle)
         env:
           PW_MCP_LIVE: '1'
           PW_MCP_VERSION: ${{ steps.ver.outputs.v }}
-        run: npx vitest run tests/contract-live.test.js
+        run: xvfb-run -a npx vitest run tests/contract-live.test.js

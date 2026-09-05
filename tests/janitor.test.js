@@ -12,7 +12,8 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { victimesConcierge } from '../src/janitor-pure.js';
-import { daemonVivant } from '../src/janitor.js';
+import fs from 'node:fs';
+import { daemonVivant, uddDeLaConfig, purgerInstancesOrphelines } from '../src/janitor.js';
 import { planInstallation } from '../src/janitor-main.js';
 
 const UDD = ['C:/Users/theo/.pw-profiles/vegeta', '/home/theo/.pw-profiles/perso'];
@@ -188,6 +189,49 @@ test('MORT = canal qui n a JAMAIS existé (aucun fichier, aucun pipe)', async ()
 // ⚠️ Ce test scelle une DÉCISION D'ARCHITECTURE, pas une chaîne de caractères : le concierge
 // s'abonne à un fait que le système SAIT déjà annoncer. Une régression vers un `setInterval` de
 // surveillance rendrait ce fichier rouge, et c'est exactement le but.
+// ═══ v2 (05/09/2026) : les INSTANCES sont à nous — préfixes ciblés, dossiers orphelins purgés ═══
+test('uddDeLaConfig : v1 userDataDir + coffre + dossier d instances (mêmes défauts que le manager)', () => {
+  const cfg = path.join(os.tmpdir(), `pw-janitor-cfg-${process.pid}.json`);
+  fs.writeFileSync(cfg, JSON.stringify({
+    defaultProfile: 'a',
+    identityStore: { dir: 'D:/coffre' }, instances: { dir: 'D:/inst' },
+    profiles: { a: { userDataDir: 'C:/x/legacy' }, b: { identity: 'b' } },
+  }));
+  try {
+    expect(uddDeLaConfig(cfg)).toEqual(['C:/x/legacy', 'D:/coffre', 'D:/inst']);
+  } finally { fs.unlinkSync(cfg); }
+});
+
+test('uddDeLaConfig : sans identityStore/instances déclarés, les DÉFAUTS sont ciblés (une instance y vit)', () => {
+  const cfg = path.join(os.tmpdir(), `pw-janitor-cfg2-${process.pid}.json`);
+  fs.writeFileSync(cfg, JSON.stringify({ defaultProfile: 'b', profiles: { b: { identity: 'b' } } }));
+  try {
+    const n = uddDeLaConfig(cfg);
+    expect(n.some((x) => x.endsWith('.pw-identities'))).toBe(true);
+    expect(n.some((x) => x.endsWith('pw-mcp-instances'))).toBe(true);
+  } finally { fs.unlinkSync(cfg); }
+});
+
+test('purgerInstancesOrphelines : supprime les SOUS-DOSSIERS du dossier d instances, jamais le dossier lui-même ni un fichier', () => {
+  const inst = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-janitor-inst-'));
+  fs.mkdirSync(path.join(inst, 'vegeta-1', 'Default'), { recursive: true });
+  fs.writeFileSync(path.join(inst, 'vegeta-1', 'Default', 'Cookies'), 'x');
+  fs.mkdirSync(path.join(inst, 'job-3'));
+  fs.writeFileSync(path.join(inst, 'note.txt'), 'pas un dossier');
+  try {
+    const sup = purgerInstancesOrphelines(inst).map((p) => path.basename(p)).sort();
+    expect(sup).toEqual(['job-3', 'vegeta-1']);
+    expect(fs.existsSync(inst), 'le dossier racine reste').toBe(true);
+    expect(fs.existsSync(path.join(inst, 'note.txt')), 'un fichier n est pas une instance').toBe(true);
+    expect(purgerInstancesOrphelines(inst), 'idempotent').toEqual([]);
+  } finally { fs.rmSync(inst, { recursive: true, force: true }); }
+});
+
+test('purgerInstancesOrphelines : dossier absent ou null ⇒ rien, sans throw (cas sain)', () => {
+  expect(purgerInstancesOrphelines(null)).toEqual([]);
+  expect(purgerInstancesOrphelines(path.join(os.tmpdir(), `pw-janitor-absent-${process.pid}`))).toEqual([]);
+});
+
 test('DÉCLENCHEURS NATIFS : boot ET réveil, via le mécanisme officiel de chaque OS', () => {
   const win = planInstallation('win32', 'C:/node.exe', 'C:/p/janitor-main.js', 'moi');
   // 🛑 Installation par XML : les raccourcis `/sc` ont TOUS été refusés sur une machine réelle

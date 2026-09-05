@@ -203,20 +203,24 @@ describe.each([
     expect(list.tools.map((t) => t.name).includes('echo_C')).toBeTruthy();
   });
 
+  // ⚠️ `storage` est TOUJOURS presente depuis le 05/09/2026 (outils d'identite) : la cap qu'on bascule
+  // pour observer le respawn est donc `pdf` (le faux backend la simule aussi).
   test('hot-reload caps : respawn du backend actif + nouvel outil a chaud', async () => {
     await request('tools/call', { name: 'switch_profile', arguments: { profile: 'vegeta' } });
     let before = await request('tools/list', {});
-    expect(!before.tools.map((t) => t.name).includes('storage_A'), 'pas encore de cap storage').toBeTruthy();
+    expect(before.tools.map((t) => t.name).includes('storage_A'), 'la cap storage est la d office (identite)').toBeTruthy();
+    expect(!before.tools.map((t) => t.name).includes('pdf_A'), 'pas encore de cap pdf').toBeTruthy();
 
     notifications.length = 0;
     const cfg = baseCfg();
-    cfg.profiles.vegeta.caps = ['storage']; // active la cap sur le profil actif
+    cfg.profiles.vegeta.caps = ['pdf']; // active la cap sur le profil actif
     writeCfg(cfg);
 
     const changed = await waitFor(() => notifications.some((n) => n.method === 'notifications/tools/list_changed'), 4000);
     expect(changed, 'tools/list_changed emis apres changement de caps').toBeTruthy();
     const after = await request('tools/list', {});
-    expect(after.tools.map((t) => t.name).includes('storage_A'), 'le backend actif a respawn avec --caps=storage').toBeTruthy();
+    expect(after.tools.map((t) => t.name).includes('pdf_A'), 'le backend actif a respawn avec --caps=pdf,storage').toBeTruthy();
+    expect(after.tools.map((t) => t.name).includes('storage_A'), 'storage toujours la apres respawn').toBeTruthy();
   });
 
   // ---- Anti-peremption du "profil actif" (incident 2026-06-02 : action sur le mauvais compte) ----

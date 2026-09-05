@@ -20,7 +20,10 @@
     "src/error-detail.js",
     "src/channel-name.js",
     "src/daemon-protocol.js",
-    "src/janitor-pure.js"
+    "src/janitor-pure.js",
+    "src/identity-store-pure.js",
+    "src/bind-host-pure.js",
+    "src/config-watch-pure.js"
   ],
   "reporters": [
     "clear-text",

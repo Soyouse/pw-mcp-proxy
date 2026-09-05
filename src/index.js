@@ -57,4 +57,7 @@ reader.on('close', () => shutdown('client deconnecte, arret'));
 process.on('SIGINT', () => shutdown('signal SIGINT, arret'));
 process.on('SIGTERM', () => shutdown('signal SIGTERM, arret'));
 
-log(`pw-mcp-proxy v${pkg.version} demarre | config=${configPath} | profil par defaut=${manager.activeProfile}`);
+// `PW_MCP_PROFILE` = EPINGLAGE de ce proxy sur un profil (la primitive du parallelisme : N entrees
+// MCP epinglees = N agents, une instance chacun). Un nom inconnu a deja fait throw dans le Manager
+// (refus NOMME au boot, jamais un repli silencieux) — ici on ne fait que le rendre visible.
+log(`pw-mcp-proxy v${pkg.version} demarre | config=${configPath} | profil actif=${manager.activeProfile}${process.env.PW_MCP_PROFILE ? ` (epingle par PW_MCP_PROFILE)` : ' (defaultProfile)'}`);

@@ -62,9 +62,77 @@ test('SÉCURITÉ : la spec rendue ne contient QUE command et args (rien ne passe
   expect(Object.keys(r.spec).sort()).toEqual(['args', 'command']);
 });
 
+// ── instance (identité à matérialiser) — depuis le 05/09/2026 ─────────────────────────────────
+const instanceValide = () => ({ identite: 'vegeta', strategie: 'snapshot', persist: true, storeDir: 'C:/coffre', instancesDir: 'C:/tmp/inst', plafonds: { maxParIdentiteMo: 300 } });
+
+test('sans instance : la requête reste celle d hier, et `instance` vaut null (profil v1 / isolé)', () => {
+  const r = validerRequete(requeteAcquire('p', specValide));
+  expect(r.valide).toBe(true);
+  expect(r.instance).toBe(null);
+  expect('instance' in requeteAcquire('p', specValide), 'pas de champ fantôme sur le fil').toBe(false);
+  expect(validerRequete({ op: 'acquire', profile: 'p', spec: specValide, instance: null }).instance).toBe(null);
+});
+
+test('avec instance : copie STRICTE, rien en contrebande, plafonds copiés (pas la même référence)', () => {
+  const inst = { ...instanceValide(), cwd: '/etc', shell: true };
+  const r = validerRequete(requeteAcquire('vegeta', specValide, inst));
+  expect(r.valide).toBe(true);
+  expect(Object.keys(r.instance).sort()).toEqual(['identite', 'instancesDir', 'persist', 'plafonds', 'storeDir', 'strategie']);
+  expect(r.instance.plafonds).toEqual({ maxParIdentiteMo: 300 });
+  expect(r.instance.plafonds, 'copie, pas la référence du message').not.toBe(inst.plafonds);
+  expect(r.instance.persist).toBe(true);
+  expect(r.instance.strategie).toBe('snapshot');
+});
+
+test('instance : plafonds absents ou non-objet ⇒ objet VIDE (les défauts se lisent dans identity-store-pure)', () => {
+  const sans = instanceValide(); delete sans.plafonds;
+  expect(validerRequete(requeteAcquire('v', specValide, sans)).instance.plafonds).toEqual({});
+  expect(validerRequete(requeteAcquire('v', specValide, { ...instanceValide(), plafonds: [] })).instance.plafonds).toEqual({});
+  expect(validerRequete(requeteAcquire('v', specValide, { ...instanceValide(), plafonds: 'non' })).instance.plafonds).toEqual({});
+});
+
+// ⚠️ Le daemon COPIE et EFFACE des dossiers à partir de ces champs : chaque garde a SON motif.
+test('instance : chaque garde produit SON motif (un seul défaut par cas)', () => {
+  const cas = [
+    ['non-objet', () => 42, /instance non-objet/],
+    ['tableau', () => [], /instance non-objet/],
+    ['identité hors alphabet (../)', () => ({ ...instanceValide(), identite: '../perso' }), /identite invalide/],
+    ['identité vide', () => ({ ...instanceValide(), identite: '' }), /identite invalide/],
+    ['identité non-string', () => ({ ...instanceValide(), identite: 7 }), /identite invalide/],
+    ['stratégie hors liste', () => ({ ...instanceValide(), strategie: 'clone' }), /strategie hors liste: clone/],
+    ['stratégie absente', () => { const i = instanceValide(); delete i.strategie; return i; }, /strategie hors liste/],
+    ['persist non booléen', () => ({ ...instanceValide(), persist: 'oui' }), /persist doit être un booléen/],
+    ['persist absent', () => { const i = instanceValide(); delete i.persist; return i; }, /persist/],
+    ['storeDir vide', () => ({ ...instanceValide(), storeDir: '' }), /storeDir absent ou vide/],
+    ['storeDir non-string', () => ({ ...instanceValide(), storeDir: null }), /storeDir/],
+    ['instancesDir vide', () => ({ ...instanceValide(), instancesDir: '' }), /instancesDir absent ou vide/],
+    ['instancesDir non-string', () => ({ ...instanceValide(), instancesDir: 1 }), /instancesDir/],
+  ];
+  for (const [nom, fabrique, motif] of cas) {
+    const r = validerRequete({ op: 'acquire', profile: 'p', spec: specValide, instance: fabrique() });
+    expect(r.valide, `doit être refusé : ${nom}`).toBe(false);
+    expect(r.raison, nom).toMatch(motif);
+  }
+});
+
+// ── jeton (canal RÉSEAU, nœud distant — 05/09/2026) ───────────────────────────────────────────
+test('token : absent par défaut (tuyau local) ; présent et non vide ⇒ transporté tel quel ; vide ⇒ absent', () => {
+  expect('token' in requeteAcquire('p', specValide), 'pas de champ fantôme sur le fil').toBe(false);
+  expect(validerRequete(requeteAcquire('p', specValide)).token).toBe(null);
+  const r = validerRequete(requeteAcquire('p', specValide, null, 'secret-42'));
+  expect(r.valide).toBe(true);
+  expect(r.token).toBe('secret-42');
+  expect('token' in requeteAcquire('p', specValide, null, ''), 'jeton vide = pas de jeton').toBe(false);
+  expect(validerRequete({ op: 'acquire', profile: 'p', spec: specValide, token: 42 }).token, 'non-string = absent (le daemon refusera)').toBe(null);
+});
+
+test('instance : les DEUX stratégies de la liste passent, persist:false aussi', () => {
+  expect(validerRequete(requeteAcquire('v', specValide, { ...instanceValide(), strategie: 'inplace', persist: false })).valide).toBe(true);
+});
+
 // ── réponses ──────────────────────────────────────────────────────────────────────────────────
-test('réponse ok : l URL traverse intacte', () => {
-  expect(lireReponse(reponseOk('http://localhost:14013/mcp'))).toEqual({ ok: true, url: 'http://localhost:14013/mcp' });
+test('réponse ok : URL et instanceId traversent intacts', () => {
+  expect(lireReponse(reponseOk('http://localhost:14013/mcp', 'vegeta-1'))).toEqual({ ok: true, url: 'http://localhost:14013/mcp', instanceId: 'vegeta-1' });
 });
 
 // ⚠️ FAILS-CLOSED : un `ok` sans url construirait `http://undefined/...` côté proxy.
@@ -73,6 +141,16 @@ test('réponse ok SANS url = traitée comme une ERREUR, jamais comme un succès 
     const r = lireReponse(msg);
     expect(r.ok, `doit échouer : ${JSON.stringify(msg)}`).toBe(false);
     expect(r.erreur).toMatch(/url/);
+  }
+});
+
+// 🛑 Un daemon ANCIEN (serveur PARTAGÉ) répond sans instanceId : REFUSÉ, avec le geste à faire.
+test('réponse ok SANS instanceId = daemon PÉRIMÉ, refusé et nommé (jamais accepté « pour compatibilité »)', () => {
+  for (const msg of [{ ok: true, url: 'http://localhost:1/mcp' }, { ok: true, url: 'http://localhost:1/mcp', instanceId: '' }, { ok: true, url: 'http://localhost:1/mcp', instanceId: 3 }]) {
+    const r = lireReponse(msg);
+    expect(r.ok, JSON.stringify(msg)).toBe(false);
+    expect(r.erreur).toMatch(/instanceId absent/);
+    expect(r.erreur).toMatch(/daemon PÉRIMÉ/);
   }
 });
 
@@ -103,13 +181,32 @@ test('PROPERTY round-trip : requête → JSON → requête, identique après un 
   );
 });
 
-test('PROPERTY round-trip : réponse ok → JSON → réponse ok, url préservée', () => {
+test('PROPERTY round-trip : réponse ok → JSON → réponse ok, url ET instanceId préservés', () => {
   fc.assert(
-    fc.property(fc.webUrl(), (url) => {
-      const r = lireReponse(JSON.parse(JSON.stringify(reponseOk(url))));
-      return r.ok === true && r.url === url;
+    fc.property(fc.webUrl(), fc.string({ minLength: 1, maxLength: 40 }), (url, id) => {
+      const r = lireReponse(JSON.parse(JSON.stringify(reponseOk(url, id))));
+      return r.ok === true && r.url === url && r.instanceId === id;
     }),
     { numRuns: 200 }
+  );
+});
+
+test('PROPERTY round-trip : requête AVEC instance → JSON → identique (identité, stratégie, persist, dossiers)', () => {
+  fc.assert(
+    fc.property(
+      fc.stringMatching(/^[A-Za-z0-9][A-Za-z0-9._-]{0,30}$/),
+      fc.constantFrom('snapshot', 'inplace'),
+      fc.boolean(),
+      fc.string({ minLength: 1, maxLength: 40 }),
+      fc.string({ minLength: 1, maxLength: 40 }),
+      (identite, strategie, persist, storeDir, instancesDir) => {
+        const envoye = requeteAcquire('p', specValide, { identite, strategie, persist, storeDir, instancesDir });
+        const r = validerRequete(JSON.parse(JSON.stringify(envoye)));
+        return r.valide === true && r.instance.identite === identite && r.instance.strategie === strategie
+          && r.instance.persist === persist && r.instance.storeDir === storeDir && r.instance.instancesDir === instancesDir;
+      }
+    ),
+    { numRuns: 300 }
   );
 });
 

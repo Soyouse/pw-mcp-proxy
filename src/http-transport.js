@@ -30,7 +30,18 @@ import { log } from './logger.js';
 import { describeError } from './error-detail.js';
 // ⚠️ SOURCE UNIQUE des delais (budget.js) — NE JAMAIS ecrire une duree en dur ici (`_delay(500)`),
 // meme « evidente » : sous cette forme elle echappe au gate temporel et sort de la source unique.
-import { GET_RETRY_MS, GET_REOPEN_MS } from './budget.js';
+import { GET_RETRY_MS, GET_REOPEN_MS, CONNECT_ATTEMPTS, CONNECT_RETRY_SCHEDULE_MS } from './budget.js';
+
+/**
+ * L'erreur vient-elle du `connect()` lui-meme (rien n'a ete envoye) ? Node rend soit une erreur
+ * systeme (`syscall:'connect'`), soit un `AggregateError` (happy-eyeballs : `localhost` essaye ::1
+ * ET 127.0.0.1) dont CHAQUE erreur porte `syscall:'connect'`. Tout autre cas = apres l'envoi.
+ */
+export function erreurDeConnect(e) {
+  if (!e || typeof e !== 'object') return false;
+  if (e.syscall === 'connect') return true;
+  return Array.isArray(e.errors) && e.errors.length > 0 && e.errors.every((x) => x && x.syscall === 'connect');
+}
 import { PROTOCOL_FALLBACK } from './protocol.js';
 
 const SESSION_HEADER = 'mcp-session-id';
@@ -54,6 +65,9 @@ export class HttpTransport extends EventEmitter {
     this._initialize = null; // le dernier message `initialize` vu passer, tel quel
     this._reouverture = null; // promesse de la reouverture EN COURS (serialise les concurrents)
     this._nReinit = 0; // discriminant des ids internes (jamais ceux du Backend)
+    // ⚠️ UN agent keep-alive PAR transport, detruit dans `close()` (sinon ses sockets vivantes
+    // retiennent le process). Cf `_req` : reduit le nombre de `connect()` loopback (classe libuv).
+    this._agent = new http.Agent({ keepAlive: true });
   }
 
   // Interface commune des transports. Rien a demarrer cote HTTP : le serveur partage vit DEJA — le
@@ -80,6 +94,12 @@ export class HttpTransport extends EventEmitter {
           method,
           headers,
           signal,
+          // ⚠️ KEEP-ALIVE (05/09/2026) : UNE connexion TCP reutilisee au lieu d'un `connect()` par POST.
+          // Sous Windows, libuv DESACTIVE la retransmission SYN vers 127.x/::1 (`uv__is_loopback`) :
+          // chaque `connect()` est un pari qu'un micro-hoquet transforme en ETIMEDOUT (mesure en
+          // live le 05/09 pendant le lancement de deux Chrome). Moins de connect = moins de paris.
+          // Ca REDUIT la classe, ca ne la supprime pas : la sortie est `bindHost` hors loopback (daemon).
+          agent: this._agent,
         },
         (res) => resolve({ status: res.statusCode, headers: res.headers, stream: res })
       );
@@ -99,12 +119,24 @@ export class HttpTransport extends EventEmitter {
    * au choix, sur n'importe quelle requete. En omettre un = 406 intermittent.
    * @param {object} msg
    */
-  _post(msg) {
-    return this._req(
-      'POST',
-      this._headers({ 'content-type': 'application/json', accept: 'application/json, text/event-stream' }),
-      JSON.stringify(msg),
-    );
+  async _post(msg) {
+    const headers = this._headers({ 'content-type': 'application/json', accept: 'application/json, text/event-stream' });
+    const body = JSON.stringify(msg);
+    // 🛑 RETRANSMISSION SYN AU NIVEAU 7 (cf budget.js CONNECT_ATTEMPTS) : un echec de `connect` n'a
+    // RIEN envoye — le rejouer est sur (idempotent par construction). Toute autre erreur remonte
+    // telle quelle : apres l'envoi, rejouer un POST dupliquerait une action navigateur.
+    for (let essai = 1; ; essai++) {
+      try {
+        return await this._req('POST', headers, body);
+      } catch (e) {
+        if (!erreurDeConnect(e) || essai >= CONNECT_ATTEMPTS) throw e;
+        // Pause = le calendrier de retransmission du NOYAU (1 s, 2 s) : les pertes viennent par
+        // fenetre, un rejeu immediat retombe dedans (mesure 05/09 : 3 essais en 600 ms, tous perdus).
+        const pause = CONNECT_RETRY_SCHEDULE_MS[essai - 1];
+        log(`POST: connect echoue (${describeError(e)}) — nouvel essai ${essai + 1}/${CONNECT_ATTEMPTS} dans ${pause} ms (SYN rejoue au niveau 7 : libuv ne retransmet pas sur loopback)`);
+        await this._delay(pause);
+      }
+    }
   }
 
   // POST un message. La/les reponse(s) remontent via l'event 'message'. Ne throw pas : signale
@@ -302,6 +334,10 @@ export class HttpTransport extends EventEmitter {
   async close() {
     if (this._closed) return;
     this._closed = true;
+    // L'agent keep-alive garde des sockets OUVERTES : les detruire ici, sinon elles retiennent le
+    // process (tests qui ne finissent pas, proxy qui ne sort pas). Apres le DELETE ci-dessous ? Non :
+    // le DELETE passe par `_req` sans agent (c'est un adieu, pas une session) — l'ordre est libre.
+    try { this._agent.destroy(); } catch { /* SILENCE: agent deja detruit par un close() concurrent — le detruire deux fois n'a aucun effet ni aucune consequence */ }
     try { this._getAbort?.abort(); } catch { /* SILENCE: annuler un flux deja termine n'est pas une erreur */ }
     // DELETE explicite (SHOULD) : libere la session cote serveur. Best-effort.
     if (this.sessionId) {

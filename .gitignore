@@ -19,3 +19,5 @@ spec/states/
 
 # Plan de cloture interne (mentionne le mainteneur ; repo PUBLIC)
 PLAN-CLOTURE.md
+# Sauvegarde locale ecrite par tools/basculer-v2.mjs (config utilisateur, jamais versionnee)
+profiles.*.bak.json

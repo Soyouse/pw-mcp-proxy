@@ -34,17 +34,34 @@ const DAEMON_MAIN = path.join(__dirname, 'daemon-main.js');
 const MAX_ESSAIS = 3;
 
 /**
- * Obtient l'URL du serveur d'un profil, en lançant le daemon si nécessaire.
- * @returns {Promise<{url:string, connexion:net.Socket}>} ⚠️ NE PAS fermer `connexion` tant que le
- *          profil sert : c'est elle qui maintient le serveur en vie.
+ * Obtient l'URL d'une INSTANCE du profil (un serveur + un Chrome pour CE proxy), en lançant le
+ * daemon si nécessaire. `options.instance` = description de l'identité à matérialiser (profil v2,
+ * cf daemon-protocol `requeteAcquire`) ; absent pour un profil v1/isolé.
+ * @returns {Promise<{url:string, instanceId:string, connexion:net.Socket}>} ⚠️ NE PAS fermer
+ *          `connexion` tant que l'instance sert : c'est elle qui maintient le serveur en vie.
  */
 export async function acquerirProfil(profile, spec, env = {}, options = {}) {
+  // ═══ NŒUD DISTANT (05/09/2026) : `PW_MCP_DAEMON=tcp://<hôte>:<port>` (+ jeton dans le fichier
+  // `PW_MCP_DAEMON_TOKEN_FILE`) ⇒ on parle au daemon d'une AUTRE machine. On ne lance JAMAIS un
+  // daemon distant (c'est l'opérateur du nœud qui l'expose) : absent = erreur NOMMÉE, pas de boucle.
+  const distant = options.daemonUrl ?? process.env.PW_MCP_DAEMON;
+  if (distant) {
+    const u = new URL(distant);
+    if (u.protocol !== 'tcp:') throw new Error(`PW_MCP_DAEMON=${distant} : forme attendue tcp://<hôte>:<port>`);
+    const tokenFile = options.tokenFile ?? process.env.PW_MCP_DAEMON_TOKEN_FILE;
+    const token = tokenFile ? fs.readFileSync(tokenFile, 'utf8').trim() : null;
+    const sock = await connecterTcp(u.hostname, Number(u.port));
+    if (!sock) throw new Error(`daemon distant ${distant} : injoignable (aucun daemon n'écoute, ou réseau) — il se lance sur le nœud, jamais d'ici`);
+    const rep = await demander(sock, profile, spec, distant, options.instance || null, token);
+    if (!rep) throw new Error(`daemon distant ${distant} : fermé avant de répondre`);
+    return rep;
+  }
   const nomCanal = daemonChannelName(env);
 
   for (let essai = 1; essai <= MAX_ESSAIS; essai++) {
     const sock = await connecter(nomCanal, env);
     if (sock) {
-      const rep = await demander(sock, profile, spec, nomCanal);
+      const rep = await demander(sock, profile, spec, nomCanal, options.instance || null);
       // ⚠️ `null` = le daemon s'est FERMÉ avant de répondre. COURSE RÉELLE, mesurée le 02/08 : le
       // dernier client d'un daemon s'en va, celui-ci sort (il n'a plus d'objet) et un autre proxy
       // se connecte pendant sa sortie — sa socket est acceptée puis tombe. C'est un FAIT du noyau,
@@ -55,7 +72,7 @@ export async function acquerirProfil(profile, spec, env = {}, options = {}) {
     }
 
     // Aucun daemon : en lancer un et ATTENDRE SON SIGNAL (jamais sonder en boucle).
-    const signal = await lancerDaemon(nomCanal, options.maxBrowsers);
+    const signal = await lancerDaemon(nomCanal, options.maxBrowsers, options.bindHost);
     if (signal === 'echec') throw new Error(`daemon ${nomCanal} : lancement impossible`);
     // 'ready' ⇒ il écoute · 'busy' ⇒ un autre a gagné la course : dans les DEUX cas, un daemon
     // est joignable maintenant. On reboucle pour s'y connecter — c'est un fait, pas une attente.
@@ -64,6 +81,16 @@ export async function acquerirProfil(profile, spec, env = {}, options = {}) {
     `daemon ${nomCanal} : ${MAX_ESSAIS} tentatives sans pouvoir s'y connecter ` +
       `(des daemons se cèdent le canal en boucle — anomalie, jamais une lenteur)`
   );
+}
+
+/** TCP vers un nœud distant : socket connectée, ou `null` (ECONNREFUSED/ETIMEDOUT/EHOSTUNREACH = personne). */
+function connecterTcp(host, port) {
+  return new Promise((resolve) => {
+    const sock = net.connect(port, host);
+    const rate = (e) => { log(`daemon distant ${host}:${port} : ${describeError(e)}`); sock.destroy(); resolve(null); };
+    sock.once('error', rate);
+    sock.once('connect', () => { sock.removeListener('error', rate); resolve(sock); });
+  });
 }
 
 /** Rend la socket connectée, ou `null` si aucun daemon n'écoute (fait exact du noyau). */
@@ -103,10 +130,11 @@ function connecter(nomCanal, env) {
 const PAIR_DISPARU = new Set(['ECONNRESET', 'EPIPE', 'ECONNABORTED']);
 
 /**
- * @returns {Promise<{url:string,connexion:net.Socket}|null>} `null` = le daemon s'est fermé avant
- *          de répondre (il sortait) : à l'appelant de reboucler — ce n'est PAS une erreur du profil.
+ * @returns {Promise<{url:string,instanceId:string,connexion:net.Socket}|null>} `null` = le daemon
+ *          s'est fermé avant de répondre (il sortait) : à l'appelant de reboucler — ce n'est PAS
+ *          une erreur du profil.
  */
-function demander(sock, profile, spec, nomCanal) {
+function demander(sock, profile, spec, nomCanal, instance, token = null) {
   return new Promise((resolve, reject) => {
     const lecteur = new NdjsonReader(sock);
     // Le daemon disparaît avant de répondre : fait exact, verdict immédiat (aucune attente).
@@ -117,7 +145,7 @@ function demander(sock, profile, spec, nomCanal) {
       const rep = lireReponse(msg);
       if (!rep.ok) { sock.destroy(); return reject(new Error(`profil ${profile} : ${rep.erreur}`)); }
       // ⚠️ La socket reste OUVERTE et est rendue à l'appelant : elle EST le ref-count.
-      resolve({ url: rep.url, connexion: sock });
+      resolve({ url: rep.url, instanceId: rep.instanceId, connexion: sock });
     });
     sock.on('error', (/** @type {NodeJS.ErrnoException} */ e) => {
       // Le pair a disparu ⇒ MÊME verdict que `close` : on rebouclera, ce n'est pas l'échec du
@@ -125,7 +153,7 @@ function demander(sock, profile, spec, nomCanal) {
       if (PAIR_DISPARU.has(e.code || '')) return coupe();
       reject(new Error(`daemon ${nomCanal} : ${describeError(e)}`));
     });
-    writeMessage(sock, requeteAcquire(profile, spec));
+    writeMessage(sock, requeteAcquire(profile, spec, instance, token));
   });
 }
 
@@ -133,13 +161,17 @@ function demander(sock, profile, spec, nomCanal) {
  * Lance le daemon et attend SON SIGNAL sur stdout — pas un délai.
  * @returns {Promise<'ready'|'busy'|'echec'>}
  */
-function lancerDaemon(nomCanal, maxBrowsers) {
+function lancerDaemon(nomCanal, maxBrowsers, bindHost) {
   return new Promise((resolve) => {
     // ⚠️ `detached` : il doit SURVIVRE au proxy qui le lance (il porte les navigateurs des autres
     // agents). ⚠️ stdout en `pipe` UNIQUEMENT pour recevoir le signal : le daemon n'écrit qu'une
     // ligne puis se tait, donc aucun risque de pipe plein ni d'EPIPE quand ce proxy mourra.
     const args = [DAEMON_MAIN, nomCanal];
     if (maxBrowsers != null) args.push(String(maxBrowsers));
+    // `bindHost` (05/09/2026) = l'adresse sur laquelle les serveurs ECOUTENT (defaut `localhost`).
+    // Argument NOMME : la position libre est deja prise par le marqueur de test ci-dessous. Impose
+    // au LANCEMENT comme la limite : le daemon ne lit aucune config, et le premier proxy decide.
+    if (typeof bindHost === 'string' && bindHost.length > 0) args.push('--bind-host', bindHost);
     // 🛑 LE DAEMON DOIT ETRE VISIBLE DU RATCHET DE TEST — c'est la CAUSE RACINE du defaut #11
     // (« le daemon et ses serveurs survivent aux runs », 6 orphelins mesures le 03/08/2026).
     // Le ratchet du harnais scanne les CMDLINE a la recherche de son marqueur. Le gardien et le

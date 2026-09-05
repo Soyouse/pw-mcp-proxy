@@ -25,6 +25,9 @@ export default defineConfig({
       'tests/error-detail.test.js',
       'tests/channel-name.test.js',
       'tests/janitor.test.js', // decision du concierge (victimesConcierge) — PURE + property
+      'tests/identity-store-pure.test.js', // decision du coffre d identites (filtre, eviction, plafonds) — PURE + property
+      'tests/bind-host-pure.test.js', // decision de l adresse d ecoute (jamais routable) — PURE + property
+      'tests/config-watch-pure.test.js', // decision du rechargement de config (empreinte, evenement, rejeu) — PURE + property
     ],
     globals: false,
   },

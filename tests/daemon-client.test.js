@@ -45,12 +45,19 @@ test('BOUT EN BOUT : le client LANCE le daemon, obtient une URL joignable', asyn
   expect(joignable, "l'URL rendue est joignable — un FAIT, pas une promesse").toBe(true);
 }, 60000);
 
-test('DEUX clients du même profil : même URL, UN seul serveur (le 2e ne relance rien)', async () => {
+// S2 RÉÉCRIT (05/09/2026) : plus aucun partage — mesuré le 04/09, deux clients d'un serveur
+// partagé s'écrasent la page. Deux clients = deux instances, deux serveurs, deux URLs.
+test('DEUX clients du même profil : DEUX URLs, DEUX instances (jamais le même onglet)', async () => {
   const e = env();
   const a = await acquerirProfil('vegeta', spec(), e);
   const b = await acquerirProfil('vegeta', spec(), e);
   ouvertes.push(a.connexion, b.connexion);
-  expect(b.url, 'le second REJOINT le serveur du premier').toBe(a.url);
+  expect(b.url, 'le second a SON serveur').not.toBe(a.url);
+  // ⚠️ Pas de numéro EXACT : le daemon de ce canal peut avoir déjà servi d'autres tests (compteur
+  // mono-thread jamais remis à zéro tant qu'il vit). Ce qui est contractuel : deux ids DISTINCTS.
+  expect(a.instanceId).toMatch(/^vegeta-\d+$/);
+  expect(b.instanceId).toMatch(/^vegeta-\d+$/);
+  expect(b.instanceId).not.toBe(a.instanceId);
 }, 60000);
 
 // ⚠️ LE cœur du refcount : fermer la connexion libère le profil, SANS aucun message d'adieu.

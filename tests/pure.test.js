@@ -14,7 +14,7 @@ import {
   isOurToolCall,
 } from '../src/collision.js';
 import { normPath, selectVictims } from '../src/prockill-pure.js';
-import { buildSpec, DEFAULT_BACKEND } from '../src/spec.js';
+import { buildSpec, DEFAULT_BACKEND, CAP_OBLIGATOIRE } from '../src/spec.js';
 import { resolveShellSpawn } from '../src/spawn-cmd.js';
 
 // ========================= collision.js =========================
@@ -137,37 +137,57 @@ test('selectVictims : procs nul / entrees nulles => robuste', () => {
 
 // ========================= spec.js =========================
 
+// ⚠️ Depuis le 05/09/2026 la cap `storage` est TOUJOURS presente (outils d'identite) : les args
+// « de base » d'un profil sans rien sont donc `[...backend.args, '--caps=storage']`.
 test('buildSpec : backend par defaut si rien de defini', () => {
   const s = buildSpec('vegeta', {}, {});
   expect(s.command).toBe('npx'); // litteral (PAS DEFAULT_BACKEND.command : muterait avec le code)
   expect(DEFAULT_BACKEND.command).toBe('npx');
-  expect(s.args).toEqual(['-y', '@playwright/mcp@latest']);
+  expect(s.args).toEqual(['-y', '@playwright/mcp@latest', '--caps=storage']);
   expect(s.label).toBe('vegeta');
 });
 
-test('buildSpec : backend override SANS args => args de base vides', () => {
+test('buildSpec : backend override SANS args => args de base vides (+ la cap obligatoire)', () => {
   const s = buildSpec('p', { backend: { command: 'solo' } }, {}); // pas de backend.args
   expect(s.command).toBe('solo');
-  expect(s.args).toEqual([]); // tue le mutant `backend.args || ["..."]`
+  expect(s.args).toEqual(['--caps=storage']); // tue le mutant `backend.args || ["..."]`
 });
 
 test('buildSpec : backend global utilise si pas d override profil', () => {
   const s = buildSpec('p', {}, { backend: { command: 'node', args: ['x.js'] } });
   expect(s.command).toBe('node');
-  expect(s.args).toEqual(['x.js']);
+  expect(s.args).toEqual(['x.js', '--caps=storage']);
 });
 
 test('buildSpec : backend du profil prime sur le global', () => {
   const s = buildSpec('p', { backend: { command: 'a', args: ['1'] } }, { backend: { command: 'b', args: ['2'] } });
   expect(s.command).toBe('a');
-  expect(s.args).toEqual(['1']);
+  expect(s.args).toEqual(['1', '--caps=storage']);
 });
 
-test('buildSpec : caps profil > caps global ; [] => pas de --caps', () => {
-  expect(buildSpec('p', { caps: ['storage'] }, { caps: ['pdf'] }).args.includes('--caps=storage')).toBeTruthy();
-  expect(buildSpec('p', {}, { caps: ['pdf', 'vision'] }).args.includes('--caps=pdf,vision')).toBeTruthy();
-  expect(!buildSpec('p', { caps: [] }, { caps: ['pdf'] }).args.some((a) => a.startsWith('--caps='))).toBeTruthy();
-  expect(!buildSpec('p', {}, {}).args.some((a) => a.startsWith('--caps='))).toBeTruthy();
+test('buildSpec : caps profil > caps global ; la cap storage est TOUJOURS la, dedoublonnee, en dernier', () => {
+  expect(CAP_OBLIGATOIRE).toBe('storage'); // litteral : c est le nom OFFICIEL de la cap (@playwright/mcp §Storage)
+  expect(buildSpec('p', { caps: ['storage'] }, { caps: ['pdf'] }).args.includes('--caps=storage'), 'deja presente : pas doublee').toBeTruthy();
+  expect(buildSpec('p', {}, { caps: ['pdf', 'vision'] }).args.includes('--caps=pdf,vision,storage'), 'caps utilisateur d abord, storage en dernier').toBeTruthy();
+  expect(buildSpec('p', { caps: [] }, { caps: ['pdf'] }).args.includes('--caps=storage'), 'profil [] prime sur le global ET garde storage').toBeTruthy();
+  expect(buildSpec('p', {}, {}).args.filter((a) => a.startsWith('--caps=')), 'UN seul --caps').toEqual(['--caps=storage']);
+  expect(buildSpec('p', { caps: ['vision', 'storage', 'pdf'] }, {}).args.includes('--caps=vision,storage,pdf'), 'ordre utilisateur preserve quand storage y est deja').toBeTruthy();
+});
+
+test('buildSpec : proxyServer ajoute --proxy-server <url> ; absent/vide/non-string => rien', () => {
+  const s = buildSpec('p', { proxyServer: 'socks5://10.87.87.1:1080' }, {});
+  const i = s.args.indexOf('--proxy-server');
+  expect(i >= 0).toBeTruthy();
+  expect(s.args[i + 1]).toBe('socks5://10.87.87.1:1080');
+  expect(buildSpec('p', {}, {}).args.includes('--proxy-server')).toBe(false);
+  expect(buildSpec('p', { proxyServer: '' }, {}).args.includes('--proxy-server')).toBe(false);
+  expect(buildSpec('p', { proxyServer: 42 }, {}).args.includes('--proxy-server')).toBe(false);
+});
+
+test('buildSpec : profil v2 (identity) => AUCUN --user-data-dir ici (valeur RUNTIME ajoutee par le daemon), meme si userDataDir traine', () => {
+  const s = buildSpec('vegeta', { identity: 'vegeta', userDataDir: 'C:/legacy' }, {});
+  expect(s.args.includes('--user-data-dir'), 'le dossier d instance n existe pas encore').toBe(false);
+  expect(s.args.includes('--isolated')).toBe(false);
 });
 
 test('buildSpec : userDataDir ajoute --user-data-dir <path>', () => {
@@ -227,27 +247,33 @@ test('buildSpec : sans isolated, userDataDir seul => --user-data-dir (pas --isol
   expect(s.args.includes('--user-data-dir')).toBeTruthy();
 });
 
-test('buildSpec : HTTP + persistant => --shared-browser-context (multi-agent, contrat documente)', () => {
-  const s = buildSpec('vegeta', { userDataDir: 'C:/x' }, {}, { http: true });
-  expect(s.args.includes('--shared-browser-context'), 'persistant multi-client partage le contexte').toBeTruthy();
-  expect(s.args.includes('--user-data-dir')).toBeTruthy();
+// 🛑 `--shared-browser-context` A DISPARU (05/09/2026) : mesure le 04/09, deux clients d'un serveur
+// partage s'ECRASENT la page (B navigue, A voit la page de B). Il n'y a plus de serveur partage :
+// une instance par client. Ce test est le NEGATIF permanent : quelle que soit la combinaison
+// (http/stdio, persistant/isole/identity), le flag n'apparait JAMAIS.
+test('buildSpec : --shared-browser-context n existe plus, dans AUCUNE combinaison', () => {
+  const cas = [
+    [{ userDataDir: 'C:/x' }, { http: true }],
+    [{ userDataDir: 'C:/x' }, { http: false }],
+    [{ isolated: true }, { http: true }],
+    [{ isolated: true, userDataDir: 'C:/ignore' }, { http: true }],
+    [{ identity: 'vegeta' }, { http: true }],
+    [{}, {}],
+    [{}, undefined],
+  ];
+  for (const [p, o] of cas) {
+    expect(buildSpec('p', p, {}, o).args.includes('--shared-browser-context'), JSON.stringify([p, o])).toBe(false);
+  }
 });
 
-test('buildSpec : HTTP + isolated => PAS de --shared-browser-context (deja parallele)', () => {
+test('buildSpec : HTTP + isolated => --isolated present (capacite conservee)', () => {
   const s = buildSpec('anon', { isolated: true }, {}, { http: true });
-  expect(!s.args.includes('--shared-browser-context')).toBeTruthy();
   expect(s.args.includes('--isolated')).toBeTruthy();
 });
 
-test('buildSpec : stdio (pas http) + persistant => PAS de --shared-browser-context (client unique)', () => {
-  const s = buildSpec('p', { userDataDir: 'C:/x' }, {}, { http: false });
-  expect(!s.args.includes('--shared-browser-context')).toBeTruthy();
-});
-
-test('buildSpec : http sans profil courant (opts.http mais isolated) n injecte pas shared-context', () => {
-  // garde-fou : --shared-browser-context UNIQUEMENT sur la branche userDataDir, jamais isolated
-  const s = buildSpec('anon', { isolated: true, userDataDir: 'C:/ignore' }, {}, { http: true });
-  expect(!s.args.includes('--shared-browser-context'), 'isolated l emporte, pas de shared-context').toBeTruthy();
+test('buildSpec : opts.http ne change RIEN aux args (le transport n est plus une dimension de la spec)', () => {
+  const p = { userDataDir: 'C:/x', caps: ['pdf'], args: ['--z'] };
+  expect(buildSpec('p', p, {}, { http: true }).args).toEqual(buildSpec('p', p, {}, { http: false }).args);
 });
 
 test('buildSpec : args libres du profil ajoutes en fin', () => {
@@ -255,9 +281,9 @@ test('buildSpec : args libres du profil ajoutes en fin', () => {
   expect(s.args.slice(-2)).toEqual(['--foo', 'bar']);
 });
 
-test('buildSpec : ordre stable base -> caps -> user-data-dir -> args libres', () => {
-  const s = buildSpec('p', { caps: ['storage'], userDataDir: 'D', args: ['--z'] }, {});
-  expect(s.args).toEqual(['-y', '@playwright/mcp@latest', '--caps=storage', '--user-data-dir', 'D', '--z']);
+test('buildSpec : ordre stable base -> caps -> user-data-dir -> proxy-server -> args libres', () => {
+  const s = buildSpec('p', { caps: ['storage'], userDataDir: 'D', proxyServer: 'http://p:1', args: ['--z'] }, {});
+  expect(s.args).toEqual(['-y', '@playwright/mcp@latest', '--caps=storage', '--user-data-dir', 'D', '--proxy-server', 'http://p:1', '--z']);
 });
 
 test('buildSpec : label du profil sinon nom du profil', () => {

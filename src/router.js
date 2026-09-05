@@ -367,7 +367,14 @@ export class Router {
   _handleCurrentProfile(msg) {
     const name = this.manager.activeProfile;
     const label = this.manager.config.profiles[name]?.label || name;
-    this._repondreTexte(msg, `Profil actif: "${name}" (${label}).`, false);
+    // L'agent DOIT pouvoir savoir s'il travaille sur une instance JETABLE d'une identite (son etat
+    // sera range au depart, ou perdu si persist:false) — et qu'un autre agent sur la meme identite
+    // ne voit PAS ses onglets (une instance chacun, mesure 04/09/2026).
+    const i = this.manager.instanceInfo(name);
+    const detail = i.identite
+      ? ` Identite "${i.identite}", instance ${i.instanceId || '(pas encore demarree)'}, strategie ${i.strategie}, ${i.persist ? 'etat range au depart' : 'etat PERDU au depart (persist:false)'}. Un autre agent sur cette identite a SA propre instance : vos onglets ne sont pas partages.`
+      : '';
+    this._repondreTexte(msg, `Profil actif: "${name}" (${label}).${detail}`, false);
   }
 
   notifyToolsChanged() {

@@ -14,6 +14,7 @@
 // Une seule ligne, puis plus rien. Les logs vont dans le fichier (logger.js), jamais sur stdout.
 
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 import { log } from './logger.js';
@@ -40,11 +41,35 @@ const canalImpose = process.argv[2];
 // ⚠️ CONSÉQUENCE À CONNAÎTRE : la limite est fixée au LANCEMENT du daemon. La changer dans
 // profiles.json ne prend effet qu'au prochain daemon (donc quand plus aucun agent n'en tient).
 const limiteImposee = process.argv[3];
+// ⚠️ `--bind-host <hote>` (05/09/2026) : adresse d'ECOUTE des serveurs, IMPOSEE par le lanceur comme
+// la limite (le premier proxy la lit dans profiles.json ; le daemon ne lit rien). Defaut `localhost`.
+// Argument NOMME (pas positionnel) : argv[3] peut deja etre le marqueur de test, en position libre.
+const iHote = process.argv.indexOf('--bind-host');
+const hoteImpose = iHote >= 0 ? process.argv[iHote + 1] : undefined;
+// ═══ NŒUD DISTANT (05/09/2026) : `--listen tcp://<hôte>:<port>` + `--token-file <chemin>` ═══
+// Le jeton vient d'un FICHIER (jamais argv : `ps` le montrerait à tout utilisateur de la machine).
+// Lancé À LA MAIN par l'opérateur sur un nœud (jamais par un proxy) : c'est lui qui expose.
+const iListen = process.argv.indexOf('--listen');
+const listenImpose = iListen >= 0 ? process.argv[iListen + 1] : undefined;
+const iToken = process.argv.indexOf('--token-file');
+const tokenFile = iToken >= 0 ? process.argv[iToken + 1] : undefined;
+let listen = null, token = undefined;
+if (listenImpose) {
+  const u = new URL(listenImpose);
+  if (u.protocol !== 'tcp:' || !u.hostname || !u.port) { log(`daemon: --listen invalide (${listenImpose}) — forme attendue tcp://<hôte>:<port>`); process.stdout.write('busy\n'); process.exit(1); }
+  listen = { host: u.hostname, port: Number(u.port) };
+}
+if (tokenFile) {
+  try { token = fs.readFileSync(tokenFile, 'utf8').trim(); } catch (e) { log(`daemon: --token-file illisible — ${describeError(e)}`); process.stdout.write('busy\n'); process.exit(1); }
+}
 // ⚠️ `onArret` : le daemon s'arrete SEUL des qu'il n'a plus ni profil ni client. C'est ICI, et
 // nulle part ailleurs, qu'on en tire la sortie du process — la classe est instanciee telle quelle
 // par les tests, un `process.exit()` en son sein tuerait leur worker.
 const daemon = new ServerDaemon({
   ...(canalImpose ? { nomCanal: canalImpose } : {}),
+  ...(hoteImpose ? { bindHost: hoteImpose } : {}),
+  ...(listen ? { listen } : {}),
+  ...(token ? { token } : {}),
   limite: limiteImposee,
   onArret: () => process.exit(0),
 });

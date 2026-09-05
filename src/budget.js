@@ -125,15 +125,52 @@ export const MAX_MISSED_PINGS = 3;
 // Motif : DISTANT (le pair est hors de portee du noyau local, aucune autorite a interroger).
 // ⚠️ Ces pauses ne bornent RIEN : elles evitent seulement de marteler un serveur qui refuse. La
 // borne de la boucle elle-meme est un DEFAUT CONNU et se traite en amont (cf doc transports).
+// ═══ RETRANSMISSION SYN AU NIVEAU 7 (05/09/2026) — le CALENDRIER du noyau, rendu a l'application ═══
+// Sous Windows, libuv DESACTIVE la retransmission SYN vers 127.x/::1 (`uv__is_loopback`, src/win/tcp.c) :
+// un `connect()` dont le SYN se perd echoue au lieu d'etre rejoue par le noyau. Mesure en live le
+// 05/09 (deux Chrome qui demarrent) : les pertes viennent par FENETRE — 3 rejeux IMMEDIATS ont tous
+// echoue en 600 ms, groupes. Le noyau, lui, retransmet a 1 s puis 2 s (RFC 6298, RTO initial 1 s,
+// backoff exponentiel) : c'est exactement ce calendrier qu'on remet ici, ni plus court (la fenetre
+// n'est pas passee) ni plus long (l'agent attend). Motif `distant` (budget no-inference) : l'autorite
+// qui SAIT — le noyau — a ete debranchee par libuv, on ne peut que l'imiter.
+// ⚠️ Ne couvre QUE `syscall=connect` (RIEN n'a ete envoye ⇒ rejouer est sur) : une erreur APRES
+// l'envoi n'est jamais rejouee (un POST double = une action navigateur en double).
+// ⚠️ Mesure aussi : une carte virtuelle (169.254.x / 10.87.87.x) paie ~2 s par connexion (premier
+// SYN sans reponse) — `bindHost` hors loopback n'est donc PAS la sortie par defaut, ceci l'est.
+export const CONNECT_RETRY_SCHEDULE_MS = Object.freeze([1000, 2000]); // pauses AVANT le 2e puis le 3e essai
+export const CONNECT_ATTEMPTS = CONNECT_RETRY_SCHEDULE_MS.length + 1;
+
 export const GET_RETRY_MS = 500; // apres un echec de connexion / une reponse inattendue
 export const GET_REOPEN_MS = 300; // apres une cloture NORMALE du flux par le serveur
 
-// Periode de scrutation du fichier de config (hot-reload). fs.watchFile POLLE : trop court = reveils
-// inutiles a la seconde ; trop long = un changement de profil met des secondes a etre vu. 1 s = compromis
-// eprouve. ⚠️ NE PAS descendre : ce timer tourne en permanence, pour un fichier qui change 2x par mois.
+// Periode de scrutation du fichier de config — REPLI SEULEMENT (05/09/2026) : le mode nominal est
+// l'EVENEMENT du noyau (`fs.watch`, cf config-watch.js) ; ce sondage ne sert que si l'OS refuse
+// (NFS/SMB, doc Node), et il est CRIE dans le log. ⚠️ NE PAS descendre : en repli ce timer tourne en
+// permanence, pour un fichier qui change 2x par mois.
 export const CONFIG_WATCH_INTERVAL_MS = 1000;
+// Rejeu de LECTURE de la config quand un autre process la tient a l'instant (antivirus, indexeur,
+// editeur en plein renommage atomique : EBUSY/EPERM/EACCES/ENOENT). Motif `distant` : aucune autorite
+// locale ne dit QUAND l'antivirus rendra le fichier. Calendrier borne ; epuise ⇒ ALERTE (changement
+// peut-etre perdu), jamais un silence. Total = 2,6 s, sous le budget client (30 s) avec marge.
+export const CONFIG_READ_RETRY_SCHEDULE_MS = Object.freeze([100, 500, 2000]);
 
 // Borne de l'alerte dead-man (NTFY). ⚠️ COURTE ET OBLIGATOIRE : alerter est best-effort, mais une
 // alerte qui PEND retiendrait un arret du proxy. Une alerte perdue est benigne ; un proxy bloque par
 // son propre canal d'alerte serait un comble (le remede devenu la panne).
 export const ALERT_TIMEOUT_MS = 4000;
+
+// ═══ UNITE, pas un delai : un jour en millisecondes ═══
+// Sert a convertir `retentionJours` (POLITIQUE du coffre d'identites, declaree dans profiles.json)
+// en une comparaison d'horodatages (`identity-store-pure.js`, `planEviction`). Vit ICI parce que
+// budget.js est la SOURCE UNIQUE de toute constante temporelle (gate no-inference) — une unite
+// redeclaree ailleurs serait indiscernable d'un delai clandestin. ⚠️ Ce n'est PAS une attente :
+// rien ne dort un jour ; on compare « il y a plus de N jours » a une horloge INJECTEE.
+export const JOUR_MS = 24 * 60 * 60 * 1000;
+
+// ═══ LIBERATION d'un dossier d'instance (identity-store `attendreLibre`) — motif `distant` ═══
+// Chrome est un PETIT-ENFANT du daemon : sa mort n'est delivree par AUCUN evenement (pas notre
+// enfant), et sous Windows ses fichiers restent verrouilles jusqu'a sa disparition. Le seul fait
+// observable = un `rename` qui reussit. Budget = FILET (un kill reussi finit toujours par liberer) ;
+// depasse ⇒ on CRIE et on ne touche a rien. Pas = periode d'observation, pas une attente.
+export const LIBERATION_BUDGET_MS = 60000;
+export const LIBERATION_POLL_MS = 100;

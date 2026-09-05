@@ -1,0 +1,25 @@
+# RÈGLE — « un flag INTERDIT n'apparaît dans AUCUN littéral de chaîne » (ast-grep, analyse AST réelle)
+#
+# Détecte le flag DANS UNE CHAÎNE (`'--shared-browser-context'`, un gabarit `${…}`), là où il
+# pourrait rejoindre une ligne de commande. Elle ne juge PAS et n'exempte RIEN : la politique
+# (quels flags sont interdits, et POURQUOI) vit dans UN SEUL endroit — `contracts/playwright-mcp.json`
+# clé `interdits`, consommée par tests/contract-snapshot.test.js, qui vérifie aussi que CHAQUE
+# interdit du contrat est couvert par une ligne `regex:` ci-dessous (cliquet EXACT).
+#
+# POURQUOI (mesuré 04/09/2026) : `--shared-browser-context` servi à N clients = les agents
+# s'écrasent la page (B navigue, A voit la page de B — la collision du 03/09). Il n'y a plus de
+# serveur partagé : sa présence dans une spec est une RÉGRESSION, pas une option.
+#
+# ⚠️ AST et JAMAIS une lecture textuelle : un COMMENTAIRE qui explique pourquoi le flag est banni
+#    contient le flag. Une lecture textuelle rougissait sur l'explication de l'interdit (mesuré
+#    05/09/2026 : 3 faux positifs, tous des commentaires) — un juge qui refuse le progrès qu'il
+#    provoque finit désarmé. `string_fragment` = le contenu d'une chaîne, et rien d'autre.
+
+id: no-forbidden-flag
+language: JavaScript
+severity: error
+message: 'Flag INTERDIT dans un littéral de chaîne — il ne doit rejoindre aucune ligne de commande (contracts/playwright-mcp.json § interdits)'
+rule:
+  kind: string_fragment
+  any:
+    - regex: '--shared-browser-context'

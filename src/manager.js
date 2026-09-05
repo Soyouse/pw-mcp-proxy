@@ -18,12 +18,20 @@ import { formatFreezeReport } from './freeze-report.js';
 // ⚠️ Le DAEMON remplace le superviseur : le ref-count est tenu par le NOYAU (socket ouverte),
 // plus par un registre fichier + heartbeat + TTL. Cf src/server-daemon.js pour le POURQUOI.
 import { acquerirProfil } from './daemon-client.js';
+// Identite (profil v2) : alphabet du nom + liste FERMEE des strategies, decides dans le module PUR.
+import { STRATEGIES, nomIdentiteValide, cheminsCoffre } from './identity-store-pure.js';
+import { verdictBindHost } from './bind-host-pure.js';
+import path from 'node:path';
+import os from 'node:os';
 // ⚠️ SOURCE UNIQUE des delais (budget.js) — NE JAMAIS redeclarer une duree ici.
-import { CONFIG_WATCH_INTERVAL_MS } from './budget.js';
+import { surveillerConfig } from './config-watch.js';
+import { empreinte } from './config-watch-pure.js';
 // ⚠️ describeError : JAMAIS `e.message` seul (il peut etre VIDE — incident 01/08).
 import { describeError } from './error-detail.js';
 // ⚠️ SOURCE UNIQUE du repli de version MCP (3 copies avant l'audit du 03/08).
 import { PROTOCOL_FALLBACK } from './protocol.js';
+
+const STRATEGIES_VALIDES = new Set(STRATEGIES);
 
 const DEFAULT_CLIENT_INFO = {
   protocolVersion: PROTOCOL_FALLBACK,
@@ -41,6 +49,14 @@ export class Manager {
     this.config = null;
     this.backends = new Map(); // profile -> Backend
     this.activeProfile = null;
+    // ⚠️ L'environnement est INJECTABLE (tests) ; defaut = celui du process. C'est lui qui porte
+    // `PW_MCP_PROFILE`, l'EPINGLAGE d'identite d'un proxy (cf _loadConfig).
+    this._env = options.env || process.env;
+    // Env transmis au CLIENT du daemon (nom du canal) : `{}` = le canal de l'utilisateur (prod).
+    // Injectable pour qu'un test LIVE lance SON daemon (code de ce depot) et jamais celui de l'operateur.
+    this._daemonEnv = options.daemonEnv || {};
+    /** profile -> instanceId rendu par le daemon (observabilite : current_profile) */
+    this._instanceIds = new Map();
     this.clientInfo = { ...DEFAULT_CLIENT_INFO }; // remplace au handshake Claude
     this.onNewBackend = null; // set par le Router (wiring des events)
     this.onConfigChange = null; // set par le Router (re-emet tools/list_changed)
@@ -66,27 +82,109 @@ export class Manager {
     return p.http !== undefined ? !!p.http : !!this.config.http;
   }
 
-  _loadConfig() {
-    const cfg = JSON.parse(fs.readFileSync(this.configPath, 'utf8'));
+  /**
+   * Charge et VALIDE la config. `texte` absent = lecture disque (boot) ; present = contenu deja lu par
+   * la surveillance (config-watch.js), qui n'avance son empreinte QUE si cette methode ne throw pas.
+   * @param {string} [texte]
+   */
+  _loadConfig(texte) {
+    const brut = texte === undefined ? fs.readFileSync(this.configPath, 'utf8') : texte;
+    if (texte === undefined) this._configHash = empreinte(brut); // empreinte du contenu charge au boot
+    const cfg = JSON.parse(brut);
     if (!cfg.profiles || typeof cfg.profiles !== 'object' || !Object.keys(cfg.profiles).length)
       throw new Error('profiles.json: "profiles" manquant ou vide');
     if (!cfg.defaultProfile || !cfg.profiles[cfg.defaultProfile])
       throw new Error('profiles.json: "defaultProfile" invalide');
+    // ═══ PROFIL v2 = IDENTITÉ (05/09/2026) — validation FAILS-CLOSED, motif nommé ═══
+    // v1 (`userDataDir`, dossier FIXE, un navigateur a la fois) et v2 (`identity`, snapshot dans
+    // le coffre, N instances jetables) COEXISTENT (expand/contract) mais JAMAIS sur le meme profil :
+    // deux verites pour un dossier = un compte qui se deconnecte en silence.
+    for (const [name, p] of Object.entries(cfg.profiles)) {
+      if (!p || typeof p !== 'object') throw new Error(`profiles.json: profil "${name}" non-objet`);
+      if (p.identity === undefined) continue;
+      if (p.userDataDir !== undefined) throw new Error(`profiles.json: profil "${name}" porte identity ET userDataDir (v1 XOR v2, jamais les deux)`);
+      if (p.isolated) throw new Error(`profiles.json: profil "${name}" porte identity ET isolated (une identite est persistante par definition)`);
+      if (!nomIdentiteValide(p.identity)) throw new Error(`profiles.json: profil "${name}" : identity "${String(p.identity)}" invalide (alphabet [A-Za-z0-9._-], 1..64, ne commence pas par . ou -)`);
+      const strategie = p.strategie ?? 'snapshot';
+      // `Set.has` et non `Array.includes` DANS la boucle des profils : le gate de complexite voit une
+      // methode de tableau dans un parcours comme un O(N²) (c'est la forme du seul O(N²) mesure du parc).
+      if (!STRATEGIES_VALIDES.has(strategie)) throw new Error(`profiles.json: profil "${name}" : strategie "${String(p.strategie)}" hors liste (${STRATEGIES.join('|')})`);
+      if (p.persist !== undefined && typeof p.persist !== 'boolean') throw new Error(`profiles.json: profil "${name}" : persist doit etre un booleen`);
+      // Une identite n'existe qu'en HTTP : c'est le DAEMON qui materialise (le transport stdio n'a
+      // pas de daemon, il ne saurait ni copier ni ranger un snapshot).
+      const http = p.http !== undefined ? !!p.http : !!cfg.http;
+      if (!http) throw new Error(`profiles.json: profil "${name}" : identity exige le mode http (le daemon materialise l'identite)`);
+    }
+    // 🛑 `bindHost` : adresse d'ECOUTE des serveurs. Sans authentification cote @playwright/mcp, une
+    // adresse routable offrirait un navigateur connecte au reseau ⇒ verdict PUR (bind-host-pure),
+    // interfaces MESUREES (os.networkInterfaces), refus NOMME. Cf §6bis du BACKLOG (classe libuv).
+    const vb = verdictBindHost(cfg.bindHost, { interfaceDeclaree: cfg.bindHostInterface, interfaces: os.networkInterfaces() });
+    if ('raison' in vb) throw new Error(`profiles.json: ${vb.raison}`); // = refus (narrowing par `in`, lisible par tsc)
     this.config = cfg;
+    // 🛑 ÉPINGLAGE : `PW_MCP_PROFILE` (env) prime sur `defaultProfile`. C'est la PRIMITIVE du
+    // parallelisme : un proxy = une instance ; N entrees MCP epinglees sur N identites = N agents
+    // qui ne se volent jamais la page (mesure 03-04/09/2026). Nom inconnu = REFUS NOMME au boot,
+    // jamais un repli silencieux sur defaultProfile (un agent travaillerait sous la MAUVAISE identite).
+    const epingle = this._env.PW_MCP_PROFILE;
+    if (epingle !== undefined && epingle !== '') {
+      if (!cfg.profiles[epingle]) {
+        const dispo = Object.keys(cfg.profiles).join(', ');
+        throw new Error(`PW_MCP_PROFILE="${epingle}" : profil inconnu dans profiles.json (disponibles : ${dispo})`);
+      }
+      if (!this.activeProfile) this.activeProfile = epingle; // au boot seulement : un switch ulterieur reste souverain
+    }
     if (!this.activeProfile || !cfg.profiles[this.activeProfile])
       this.activeProfile = cfg.defaultProfile;
   }
 
+  /**
+   * Description d'INSTANCE a transmettre au daemon pour un profil v2, `null` pour un v1/isole.
+   * Tout ce que le daemon doit savoir passe ICI (il ne lit aucune config) : identite, strategie,
+   * persist, coffre, dossier d'instances, plafonds — SOURCE UNIQUE des defauts de chemins.
+   * ⚠️ `identityStore`/`instances` sont des ecrivains DISQUE declares : chemin + plafonds + politique
+   * vivent dans profiles.json (defauts ici), l'eviction dans identity-store-pure.js.
+   */
+  _instanceDe(profile) {
+    const p = this.config.profiles[profile] || {};
+    if (p.identity === undefined) return null;
+    const store = this.config.identityStore || {};
+    // ⚠️ `cheminsCoffre` = SOURCE UNIQUE des defauts de chemins, partagee avec le CONCIERGE : deux
+    // defauts differents = un concierge qui nettoie a cote (ou chez autrui).
+    const { storeDir, instancesDir } = cheminsCoffre(this.config, { homedir: os.homedir(), tmpdir: os.tmpdir() }, path.join);
+    return {
+      identite: p.identity,
+      strategie: p.strategie ?? 'snapshot',
+      persist: p.persist ?? true,
+      storeDir,
+      instancesDir,
+      plafonds: { maxParIdentiteMo: store.maxParIdentiteMo, maxTotalMo: store.maxTotalMo, retentionJours: store.retentionJours },
+    };
+  }
+
+  /** Observabilite (current_profile) : sur quelle INSTANCE ce proxy travaille, et sa nature. */
+  instanceInfo(profile) {
+    const inst = this._instanceDe(profile);
+    return { instanceId: this._instanceIds.get(profile) || null, identite: inst?.identite || null, strategie: inst?.strategie || null, persist: inst ? inst.persist : null, jetable: !!inst && inst.strategie === 'snapshot' };
+  }
+
+  // 🛑 HOT-RELOAD : l'OS REVEILLE (fs.watch sur le DOSSIER), le CONTENU DECIDE (empreinte sha256 vs
+  // charge). Un evenement double, un antivirus qui touche le fichier, un nom d'evenement absent : tout
+  // est absorbe par la comparaison de contenu. Une config invalide est IGNOREE (l'ancienne reste) et
+  // son empreinte n'est PAS avancee : elle sera rejugee au prochain reveil. Cf config-watch.js.
   _watch() {
-    fs.watchFile(this.configPath, { interval: CONFIG_WATCH_INTERVAL_MS }, async () => {
-      try {
-        this._loadConfig();
-        await this._reconcile();
-        log('config rechargee (hot-reload)');
-        if (this.onConfigChange) this.onConfigChange();
-      } catch (e) {
-        log('config reload IGNOREE (invalide) : ' + describeError(e)); // on garde l'ancienne config valide
-      }
+    this._surveillance = surveillerConfig(this.configPath, {
+      hashInitial: this._configHash,
+      log,
+      alerter: (msg) => { log(msg); alert(msg); },
+      onContenu: (texte) => {
+        this._loadConfig(texte); // throw = refus nomme, empreinte non avancee (config-watch)
+        // _reconcile est asynchrone (stop/get de backends) ; sa promesse ne conditionne pas l'acceptation
+        // du contenu — un echec de reconciliation se loggue, il n'annule pas une config VALIDE.
+        this._reconcile().then(() => {
+          log('config rechargee (hot-reload)');
+          if (this.onConfigChange) this.onConfigChange();
+        }, (e) => log('reconciliation apres hot-reload : ' + describeError(e)));
+      },
     });
   }
 
@@ -127,10 +225,10 @@ export class Manager {
     }
   }
 
-  // Delegue a buildSpec (pur, mutation-teste). Le manager fournit la config + le flag http (qui decide
-  // --shared-browser-context pour un profil persistant multi-agent, cf spec.js / doc @playwright/mcp).
+  // Delegue a buildSpec (pur, mutation-teste). Le transport n'est plus une dimension de la spec
+  // (05/09/2026 : plus de --shared-browser-context, une instance par client quel que soit le mode).
   _spec(profile) {
-    return buildSpec(profile, this.config.profiles[profile], this.config, { http: this._isHttp(profile) });
+    return buildSpec(profile, this.config.profiles[profile], this.config);
   }
 
   async get(profile) {
@@ -248,14 +346,15 @@ export class Manager {
   async _makeTransport(profile) {
     const spec = this._spec(profile);
     if (!this._isHttp(profile)) return new StdioTransport(profile, spec);
-    // ⚠️ Le daemon GARANTIT le serveur (le demarre si besoin, le partage sinon) et rend une socket.
-    // Cette socket EST le ref-count : on la GARDE ouverte, `_release` la fermera. La fermer ici
-    // libererait le profil aussitot et tuerait le navigateur sous l'agent.
+    // ⚠️ Le daemon cree UNE INSTANCE pour ce proxy (materialise l'identite v2, lance son serveur)
+    // et rend une socket. Cette socket EST le ref-count : on la GARDE ouverte, `_release` la
+    // fermera. La fermer ici terminerait l'instance aussitot et tuerait le navigateur sous l'agent.
     // `maxBrowsers` (optionnel, absent = illimite) : garde-fou CHOISI par l'utilisateur, applique
-    // par le daemon au LANCEMENT. Il REFUSE un profil de plus, il n'evince jamais.
-    const { url, connexion } = await acquerirProfil(profile, spec, {}, { maxBrowsers: this.config.maxBrowsers });
+    // par le daemon au LANCEMENT. Il REFUSE une instance de plus, il n'evince jamais.
+    const { url, instanceId, connexion } = await acquerirProfil(profile, spec, this._daemonEnv, { maxBrowsers: this.config.maxBrowsers, bindHost: this.config.bindHost, instance: this._instanceDe(profile) });
     this._closeConnexion(profile); // une SEULE connexion par profil (re-acquisition apres purge)
     this._connexions.set(profile, connexion);
+    this._instanceIds.set(profile, instanceId);
     return new HttpTransport(url, { protocolVersion: this.clientInfo.protocolVersion, spec });
   }
 
@@ -263,6 +362,7 @@ export class Manager {
   // idempotent : liberer ne doit JAMAIS faire echouer une bascule reussie.
   _closeConnexion(profile) {
     const c = this._connexions.get(profile);
+    this._instanceIds.delete(profile);
     if (!c) return;
     this._connexions.delete(profile);
     try { c.destroy(); } catch (e) { log(`[daemon:${profile}] fermeture: ${describeError(e)}`); }
@@ -335,15 +435,23 @@ export class Manager {
       b.stop();
       this.backends.delete(profile);
     }
+    // v1 (dossier FIXE) : balayage chirurgical des orphelins qui tiendraient encore CE user-data-dir.
+    // v2 (identite) : RIEN a balayer ici — l'instance appartient au DAEMON, qui la range et la
+    // supprime a la fermeture de notre socket (ci-dessous, via _closeConnexion dans get/_makeTransport) ;
+    // un balayage par dossier d'instance viserait un dossier que le daemon est en train de ranger.
     const dir = this.config.profiles[profile].userDataDir;
     if (dir) {
       const killed = sweepByCmd([dir], process.pid);
       if (killed.length) log(`restart_profile ${profile}: ${killed.length} orphelin(s) tue(s) [${killed.join(',')}]`);
     }
+    // ⚠️ Fermer la socket AVANT de redemander : sinon le daemon nous rendrait... rien de partage
+    // (plus de partage), mais l'ancienne instance survivrait tant que cette socket vit.
+    this._closeConnexion(profile);
     return this.get(profile);
   }
 
   stopAll() {
+    if (this._surveillance) { this._surveillance.fermer(); this._surveillance = null; }
     for (const b of this.backends.values()) b.stop();
     this.backends.clear();
     // Rendre TOUS mes profils au daemon. La correction n'en depend pas (le noyau ferme les sockets
