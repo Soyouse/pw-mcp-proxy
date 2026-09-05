@@ -4,6 +4,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ## [Unreleased]
 
+### Added — identity fingerprint via the official `--config` file (2026-09-05)
+- New `playwrightConfig` key (global or per profile, profile wins): the content of `@playwright/mcp`'s
+  own `--config` file, passed as is (`browser.launchOptions.args` = any Chrome flag,
+  `browser.contextOptions` = locale, timezone, viewport, user agent…). This is the only place where
+  an identity gets its language, time zone and screen. Keys the proxy decides itself (`server`,
+  `capabilities`, `sharedBrowserContext`, `extension`, `browser.userDataDir/isolated/cdpEndpoint/
+  remoteEndpoint`) are refused with a named error, at config load and again at the daemon boundary.
+- The daemon writes `<instance>.config.json` next to the instance directory, passes `--config`, and
+  deletes it when the client leaves; the janitor purges orphaned ones. Changing the fingerprint
+  hot-reloads the profile. Proven live on real Chrome: `navigator.language`, time zone and viewport
+  read back from the page. Contract regenerated (`--config` is now a required flag).
+
 ### Fixed — instance cleanup on POSIX waited for the wrong fact (2026-09-05)
 - Found by the nightly live suite on Ubuntu, reproduced on a Linux host: Playwright starts Chrome in
   its own process group, so killing the guard's group leaves Chrome alive for ~0.5 s; it then shuts

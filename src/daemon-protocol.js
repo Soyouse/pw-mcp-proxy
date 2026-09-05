@@ -36,6 +36,7 @@
 // une exception — le daemon sert N clients, l'un d'eux ne doit pas pouvoir le faire tomber.
 
 import { STRATEGIES, nomIdentiteValide } from './identity-store-pure.js';
+import { verdictConfiguration } from './spec.js';
 
 /** Opérations acceptées. Une seule aujourd'hui : le protocole minimal qui suffit. */
 export const OPS = Object.freeze(['acquire']);
@@ -113,8 +114,16 @@ export function validerRequete(msg) {
     if (!v.ok) return { valide: false, raison: v.raison };
     instance = v.instance;
   }
+  // `configuration` (fichier --config) : REVALIDEE ici — le daemon ECRIT ce contenu sur disque puis le
+  // donne a un processus ; une cle reservee glissee par un client serait un port/hote/dossier detourne.
+  let configuration = null;
+  if (spec.configuration !== undefined && spec.configuration !== null) {
+    const v = verdictConfiguration(spec.configuration);
+    if ('raison' in v) return { valide: false, raison: v.raison };
+    configuration = v.configuration;
+  }
   const token = typeof msg.token === 'string' && msg.token.length > 0 ? msg.token : null;
-  return { valide: true, profile: msg.profile, spec: { command: spec.command, args: spec.args }, instance, token };
+  return { valide: true, profile: msg.profile, spec: { command: spec.command, args: spec.args, configuration }, instance, token };
 }
 
 /**

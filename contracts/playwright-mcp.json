@@ -4,11 +4,12 @@
   "version": "0.0.80",
   "distTagLatestAuMomentDuSnapshot": "0.0.80",
   "capturePar": "npx -y @playwright/mcp@0.0.80 --help",
-  "captureLe": "2026-09-04",
+  "captureLe": "2026-09-05",
   "requis": {
     "_pourquoi": "Flags que le CODE construit reellement (src/spec.js, src/manager.js). La disparition de l'UN d'eux casse le proxy en PRODUCTION => ROUGE FATAL.",
     "flags": [
       "--caps",
+      "--config",
       "--host",
       "--isolated",
       "--port",

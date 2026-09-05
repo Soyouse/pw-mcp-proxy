@@ -18,7 +18,7 @@ const PACKAGE = '@playwright/mcp';
 const VERSION = process.argv[2] || '0.0.80';
 
 // Flags REQUIS par le code (src/spec.js, src/manager.js) : leur disparition casse le proxy en prod.
-const REQUIS = ['--caps', '--host', '--isolated', '--port', '--proxy-server', '--user-data-dir'];
+const REQUIS = ['--caps', '--config', '--host', '--isolated', '--port', '--proxy-server', '--user-data-dir'];
 
 // Flags dont la PRÉSENCE dans une spec construite par le proxy est une RÉGRESSION (mesuré
 // 04/09/2026 : deux clients d'un serveur partagé s'écrasent la page). Interdit ≠ absent du binaire :

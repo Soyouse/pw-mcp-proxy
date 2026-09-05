@@ -12,7 +12,7 @@ import { HttpTransport } from './http-transport.js';
 import { log } from './logger.js';
 import { alert } from './notify.js';
 import { sweepByCmd, listProcesses } from './prockill.js';
-import { buildSpec } from './spec.js';
+import { buildSpec, verdictConfiguration } from './spec.js';
 import { shouldAutoRestart, DEFAULT_MAX_RESTARTS, DEFAULT_WINDOW_MS } from './auto-restart.js';
 import { formatFreezeReport } from './freeze-report.js';
 // ⚠️ Le DAEMON remplace le superviseur : le ref-count est tenu par le NOYAU (socket ouverte),
@@ -99,8 +99,11 @@ export class Manager {
     // v1 (`userDataDir`, dossier FIXE, un navigateur a la fois) et v2 (`identity`, snapshot dans
     // le coffre, N instances jetables) COEXISTENT (expand/contract) mais JAMAIS sur le meme profil :
     // deux verites pour un dossier = un compte qui se deconnecte en silence.
+    // `playwrightConfig` (global et par profil) = fichier --config officiel : cles en conflit REFUSEES au boot.
+    if (cfg.playwrightConfig !== undefined) { const v = verdictConfiguration(cfg.playwrightConfig); if ('raison' in v) throw new Error(`profiles.json: ${v.raison}`); }
     for (const [name, p] of Object.entries(cfg.profiles)) {
       if (!p || typeof p !== 'object') throw new Error(`profiles.json: profil "${name}" non-objet`);
+      if (p.playwrightConfig !== undefined) { const v = verdictConfiguration(p.playwrightConfig); if ('raison' in v) throw new Error(`profiles.json: profil "${name}" : ${v.raison}`); }
       if (p.identity === undefined) continue;
       if (p.userDataDir !== undefined) throw new Error(`profiles.json: profil "${name}" porte identity ET userDataDir (v1 XOR v2, jamais les deux)`);
       if (p.isolated) throw new Error(`profiles.json: profil "${name}" porte identity ET isolated (une identite est persistante par definition)`);
@@ -201,7 +204,8 @@ export class Manager {
         continue;
       }
       const newSpec = this._spec(name);
-      if (JSON.stringify(newSpec.args) !== JSON.stringify(b.spec.args)) {
+      // Signature = args ET configuration (fichier --config) : un changement d'empreinte respawn aussi.
+      if (JSON.stringify([newSpec.args, newSpec.configuration]) !== JSON.stringify([b.spec.args, b.spec.configuration])) {
         const wasActive = name === this.activeProfile;
         b.stop();
         this.backends.delete(name);

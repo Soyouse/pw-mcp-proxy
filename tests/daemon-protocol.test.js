@@ -25,7 +25,7 @@ test('une requête construite est acceptée, et rend EXACTEMENT ce qui a été e
   const r = validerRequete(requeteAcquire('vegeta', specValide));
   expect(r.valide).toBe(true);
   expect(r.profile).toBe('vegeta');
-  expect(r.spec).toEqual(specValide);
+  expect(r.spec).toEqual({ ...specValide, configuration: null });
 });
 
 test('REFUS explicite (jamais un throw) sur toute requête malformée', () => {
@@ -52,14 +52,14 @@ test('REFUS explicite (jamais un throw) sur toute requête malformée', () => {
 });
 
 // ⚠️ Le daemon SPAWNE à partir de ces données : la validation est une frontière de sécurité.
-test('SÉCURITÉ : la spec rendue ne contient QUE command et args (rien ne passe en contrebande)', () => {
+test('SÉCURITÉ : la spec rendue ne contient QUE command, args et configuration (rien ne passe en contrebande)', () => {
   const r = validerRequete({
     op: 'acquire',
     profile: 'p',
     spec: { command: 'npx', args: ['--port'], cwd: '/etc', env: { PATH: '/evil' }, shell: true },
   });
   expect(r.valide).toBe(true);
-  expect(Object.keys(r.spec).sort()).toEqual(['args', 'command']);
+  expect(Object.keys(r.spec).sort()).toEqual(['args', 'command', 'configuration']);
 });
 
 // ── instance (identité à matérialiser) — depuis le 05/09/2026 ─────────────────────────────────
@@ -333,4 +333,22 @@ test('property : sous la limite on passe TOUJOURS, à partir d elle on refuse TO
 
 test('property : sans limite, AUCUN nombre de profils ne bloque (même 90 milliards)', () => {
   fc.assert(fc.property(fc.integer({ min: 0, max: 9e9 }), (n) => placeDisponible(n, null) === true));
+});
+
+
+// ═══ configuration (fichier --config) traverse la frontiere, REVALIDEE (05/09/2026) ═══
+test('validerRequete : spec.configuration acceptee et clonee ; absente ⇒ null', () => {
+  const cfg = { browser: { contextOptions: { locale: 'fr-FR' } } };
+  const v = validerRequete({ op: 'acquire', profile: 'p', spec: { ...specValide, configuration: cfg } });
+  expect(v.valide).toBe(true);
+  expect(/** @type {any} */ (v).spec.configuration).toEqual(cfg);
+  expect(/** @type {any} */ (v).spec.configuration).not.toBe(cfg);
+  expect(/** @type {any} */ (validerRequete({ op: 'acquire', profile: 'p', spec: specValide })).spec.configuration).toBe(null);
+});
+
+test('validerRequete : une cle reservee glissee par un client est REFUSEE (port/hote/dossier ne se detournent pas)', () => {
+  const v = validerRequete({ op: 'acquire', profile: 'p', spec: { ...specValide, configuration: { server: { port: 1 } } } });
+  expect(v).toEqual({ valide: false, raison: 'playwrightConfig.server est decide par le proxy (interdit dans le fichier)' });
+  const v2 = validerRequete({ op: 'acquire', profile: 'p', spec: { ...specValide, configuration: { browser: { userDataDir: '/x' } } } });
+  expect(v2.valide).toBe(false);
 });

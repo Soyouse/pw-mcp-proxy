@@ -54,6 +54,8 @@ function fauxStore() {
     // Le vrai `attendreLibre` renomme en `<dir>.fini` quand plus aucun process ne tient le dossier ; le
     // faux le simule sans disque (le daemon doit ranger/supprimer le chemin RENDU, jamais l'original).
     attendreLibre: async (dir) => { appels.push(['attendreLibre', dir]); return `${dir}.fini`; },
+    ecrireConfigInstance: (chemin, cfg) => { appels.push(['ecrireConfigInstance', chemin, cfg]); return chemin; },
+    supprimerConfigInstance: (chemin) => { appels.push(['supprimerConfigInstance', chemin]); },
   };
 }
 
@@ -83,7 +85,7 @@ function faux(overrides = {}) {
 const INSTANCE = (identite, extra = {}) => ({ identite, strategie: 'snapshot', persist: true, storeDir: '/coffre', instancesDir: '/inst', plafonds: {}, ...extra });
 
 // Un client : se connecte, demande un profil (± une identité), garde la connexion OUVERTE (= il compte).
-function client(nomCanal, profil, instance = null) {
+function client(nomCanal, profil, instance = null, extraSpec = {}) {
   return new Promise((resolve, reject) => {
     const sock = net.connect(nomCanal);
     socks.push(sock);
@@ -96,7 +98,7 @@ function client(nomCanal, profil, instance = null) {
       const rep = lireReponse(JSON.parse(buf.slice(0, nl)));
       resolve({ sock, rep });
     });
-    sock.write(JSON.stringify(requeteAcquire(profil, SPEC, instance)) + '\n');
+    sock.write(JSON.stringify(requeteAcquire(profil, { ...SPEC, ...extraSpec }, instance)) + '\n');
   });
 }
 
@@ -512,4 +514,33 @@ test('maxBrowsers : la limite compte les instances — même profil ou pas — e
   await fermeEtAttend(d, a.sock);
   const c = await client(d.nomCanal, 'perso');
   expect(c.rep.ok, 'place libérée => acceptée').toBe(true);
+});
+
+
+// ═══ playwrightConfig ⇒ fichier --config ECRIT avant le spawn, a cote de l instance, SUPPRIME au rangement ═══
+test('configuration : --config <dir>.config.json ecrit AVANT le spawn, supprime APRES le rangement', async () => {
+  let argsVus = null;
+  const enf = fauxEnfants(7000);
+  const d = faux({ spawnFn: (cmd, args, opts) => { argsVus = args; return enf.spawnFn(cmd, args, opts); }, tuer: enf.tuer });
+  await d.demarrer();
+  const cfg = { browser: { contextOptions: { locale: 'fr-FR' } } };
+  const { rep, sock } = await client(d.nomCanal, 'vegeta', INSTANCE('vegeta'), { configuration: cfg });
+  expect(rep.instanceId).toBe('vegeta-1');
+  const i = argsVus.indexOf('--config');
+  expect(i, '--config passe au serveur').toBeGreaterThan(0);
+  expect(argsVus[i + 1]).toBe('/inst/vegeta-1.config.json');
+  expect(d._store.appels[1]).toEqual(['ecrireConfigInstance', '/inst/vegeta-1.config.json', cfg]);
+  await fermeEtAttend(d, sock);
+  expect(d._store.appels.at(-1)).toEqual(['supprimerConfigInstance', '/inst/vegeta-1.config.json']);
+});
+
+test('configuration sans identite (profil isole) : fichier dans le dossier d instances par defaut, sous l id', async () => {
+  let argsVus = null;
+  const enf = fauxEnfants(7100);
+  const d = faux({ spawnFn: (cmd, args, opts) => { argsVus = args; return enf.spawnFn(cmd, args, opts); }, tuer: enf.tuer });
+  await d.demarrer();
+  const { rep } = await client(d.nomCanal, 'anon', null, { configuration: { timeouts: { action: 1000 } } });
+  const i = argsVus.indexOf('--config');
+  expect(i).toBeGreaterThan(0);
+  expect(argsVus[i + 1].replace(/\\/g, '/').endsWith(`/pw-mcp-instances/${rep.instanceId}.config.json`)).toBe(true);
 });

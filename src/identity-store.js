@@ -240,6 +240,27 @@ export async function attendreLibre(instanceDir, { budgetMs = LIBERATION_BUDGET_
 }
 
 /**
+ * Ecrit le fichier `--config` d'une instance (contenu = `playwrightConfig` du profil, deja valide).
+ * A COTE du dossier d'instance (`<dir>.config.json`), jamais DEDANS : le dedans est le profil Chrome
+ * (il serait copie dans le snapshot). Ecrivain disque declare : un petit fichier par instance, supprime
+ * avec elle (`supprimerConfigInstance`), et purge par le concierge s'il est orphelin.
+ * @param {string} chemin
+ * @param {object} configuration
+ */
+export function ecrireConfigInstance(chemin, configuration) {
+  fs.mkdirSync(path.dirname(chemin), { recursive: true });
+  fs.writeFileSync(chemin, JSON.stringify(configuration, null, 2));
+  return chemin;
+}
+
+/** Supprime le fichier de config d'une instance. Idempotent, ne throw jamais (fin de vie). */
+export function supprimerConfigInstance(chemin) {
+  if (!chemin) return;
+  try { fs.rmSync(chemin, { force: true }); }
+  catch (e) { log(`identity-store: suppression config instance échouée — ${chemin} — ${describeError(e)}`); }
+}
+
+/**
  * Supprime un dossier d'instance. Idempotent (dossier déjà absent = succès silencieux), ne
  * throw JAMAIS : c'est un nettoyage de fin de vie, une panne ici ne doit pas empêcher le reste
  * du cycle de vie (le daemon a d'autres choses à finir).

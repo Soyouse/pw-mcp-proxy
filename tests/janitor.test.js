@@ -264,3 +264,15 @@ test('DÉCLENCHEURS NATIFS : boot ET réveil, via le mécanisme officiel de chaq
   expect(win.contenu).toContain('C:/node.exe');
   expect(linux.contenu).toContain('/usr/bin/node');
 });
+
+test('purgerInstancesOrphelines : un fichier `<id>.config.json` orphelin part avec les dossiers, un autre fichier reste', () => {
+  const inst = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-janitor-inst-'));
+  fs.mkdirSync(path.join(inst, 'vegeta-1'));
+  fs.writeFileSync(path.join(inst, 'vegeta-1.config.json'), '{}');
+  fs.writeFileSync(path.join(inst, 'note.txt'), 'pas a nous');
+  try {
+    const sup = purgerInstancesOrphelines(inst).map((p) => path.basename(p)).sort();
+    expect(sup).toEqual(['vegeta-1', 'vegeta-1.config.json']);
+    expect(fs.existsSync(path.join(inst, 'note.txt'))).toBe(true);
+  } finally { fs.rmSync(inst, { recursive: true, force: true }); }
+});

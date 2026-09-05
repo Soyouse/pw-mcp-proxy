@@ -36,7 +36,9 @@ import { NdjsonReader, writeMessage } from './jsonrpc.js';
 import { daemonChannelName, channelIsFile } from './channel-name.js';
 import { validerRequete, reponseOk, reponseErreur, lireLimite, placeDisponible } from './daemon-protocol.js';
 import { instanceId as fabriquerInstanceId } from './identity-store-pure.js';
-import { materialiser, snapshotRetour, supprimerInstance, attendreLibre } from './identity-store.js';
+import { materialiser, snapshotRetour, supprimerInstance, attendreLibre, ecrireConfigInstance, supprimerConfigInstance } from './identity-store.js';
+import { cheminsCoffre } from './identity-store-pure.js';
+import os from 'node:os';
 import { allocateEphemeralPort } from './port-alloc.js';
 import { attendreReady } from './readiness.js';
 import { treeKill } from './prockill.js';
@@ -74,7 +76,7 @@ export class ServerDaemon extends EventEmitter {
    * @param {{env?:object, spawnFn?:Function, tuer?:Function, allouerPort?:Function,
    *          attendre?:Function, budgetMs?:number, nomCanal?:string, onArret?:Function,
    *          limite?:number|string, bindHost?:string, listen?:{host:string, port:number}, token?:string,
-   *          store?:{materialiser:Function, snapshotRetour:Function, supprimerInstance:Function, attendreLibre:Function},
+   *          store?:{materialiser:Function, snapshotRetour:Function, supprimerInstance:Function, attendreLibre:Function, ecrireConfigInstance:Function, supprimerConfigInstance:Function},
    *          alerter?:Function}} [options] injections des tests + parametres imposes par le lanceur
    */
   constructor(options = {}) {
@@ -86,7 +88,7 @@ export class ServerDaemon extends EventEmitter {
     this._attendre = options.attendre || attendreReady;
     this._budgetMs = options.budgetMs ?? READY_TIMEOUT_MS;
     // Le coffre est INJECTABLE (tests : un store en memoire, zero disque) ; defaut = identity-store.js.
-    this._store = options.store || { materialiser, snapshotRetour, supprimerInstance, attendreLibre };
+    this._store = options.store || { materialiser, snapshotRetour, supprimerInstance, attendreLibre, ecrireConfigInstance, supprimerConfigInstance };
     this._alerter = options.alerter || alert;
     // ⚠️ ADRESSE D'ECOUTE des serveurs (05/09/2026). Defaut `localhost` = le produit OSS marche partout.
     // Hors loopback (carte dediee, adresse VALIDEE par le manager : jamais routable) pour sortir de la
@@ -274,6 +276,7 @@ export class ServerDaemon extends EventEmitter {
     } catch (e) {
       // Le serveur n'a jamais servi : le dossier matérialisé n'a rien à ranger, on le retire.
       if (dir && instance.strategie === 'snapshot') this._store.supprimerInstance(dir);
+      if (spec.configuration) this._store.supprimerConfigInstance(this._cheminConfig(id, dir, instance));
       throw e;
     }
     etat.sock = sock;
@@ -284,9 +287,19 @@ export class ServerDaemon extends EventEmitter {
     return etat;
   }
 
+  /** Chemin du fichier `--config` d'une instance : a cote du dossier d'instance, sinon dans le dossier d'instances par defaut. */
+  _cheminConfig(id, dir, instance) {
+    if (dir) return `${dir}.config.json`;
+    const base = instance && instance.instancesDir ? instance.instancesDir : cheminsCoffre({}, { homedir: os.homedir(), tmpdir: os.tmpdir() }, path.join).instancesDir;
+    return path.join(base, `${id}.config.json`);
+  }
+
   async _demarrerServeur(desc, spec) {
-    const { instanceId: id, profil, dir } = desc;
+    const { instanceId: id, profil, dir, instance } = desc;
     const port = await this._allouerPort(this.hote);
+    // `playwrightConfig` du profil ⇒ fichier `--config` ECRIT ICI (valeur runtime : son chemin depend de
+    // l'instance), supprime au rangement. Contenu deja valide DEUX fois (manager + protocole).
+    const configFichier = spec.configuration ? this._store.ecrireConfigInstance(this._cheminConfig(id, dir, instance), spec.configuration) : null;
     // Le `--user-data-dir` d'une INSTANCE est une valeur RUNTIME, ajoutée ICI comme le port (cf spec.js).
     // 🛑 JAMAIS `--allowed-hosts` ici, même hors loopback — LU DANS LE CODE INSTALLÉ (0.0.80,
     // `installHttpTransport`, coreBundle.js) : la couche MCP compare l'en-tête `Host` ENTIER
@@ -294,7 +307,7 @@ export class ServerDaemon extends EventEmitter {
     // `--allowed-hosts <hote>` sans port REMPLACE ce défaut correct par une liste fausse ⇒ 403 sur
     // chaque requête (mesuré en live le 05/09 : 8/8 tests rouges sur 169.254.29.100). Le port
     // n'étant connu qu'après le bind, le défaut du serveur est le seul choix juste.
-    const rawArgs = [...spec.args, ...(dir ? ['--user-data-dir', dir] : []), '--host', this.hote, '--port', String(port)];
+    const rawArgs = [...spec.args, ...(dir ? ['--user-data-dir', dir] : []), ...(configFichier ? ['--config', configFichier] : []), '--host', this.hote, '--port', String(port)];
     // 🛑 ON NE LANCE JAMAIS LE SERVEUR DIRECTEMENT : on lance un GARDIEN (`child-guard.js`) qui le
     // porte. Le gardien tient notre stdin ; si CE daemon meurt brutalement (`kill -9`, OOM), le
     // noyau ferme le tuyau, le gardien recoit EOF et tue le serveur. L'ORPHELIN — un serveur qui
@@ -329,7 +342,7 @@ export class ServerDaemon extends EventEmitter {
 
     // URL_HOST (`localhost`) et `this.hote` coincident par defaut ; hors loopback l'URL porte l'adresse
     // d'ecoute — la MEME chaine que `--host`/`--allowed-hosts`, jamais une resolution differente.
-    const etat = { ...desc, port, pid, child, url: `http://${this.hote === BIND_HOST ? URL_HOST : this.hote}:${port}/mcp`, sock: null, fini: false, exited: false };
+    const etat = { ...desc, port, pid, child, configFichier, url: `http://${this.hote === BIND_HOST ? URL_HOST : this.hote}:${port}/mcp`, sock: null, fini: false, exited: false };
     // 🛑 L'`exit` du serveur est un FAIT du noyau, delivre a NOUS parce que nous sommes son PARENT.
     // Enregistre AVANT toute attente : un serveur qui meurt pendant la readiness doit etre vu.
     child.on('exit', (code, sig) => {
@@ -422,6 +435,7 @@ export class ServerDaemon extends EventEmitter {
       }
     }
     if (dir && instance && instance.strategie === 'snapshot') this._store.supprimerInstance(dirLibre);
+    if (etat.configFichier) this._store.supprimerConfigInstance(etat.configFichier);
     log(`[daemon:${id}] instance terminée (${cause}, profil ${profil})`);
     this._emettreLibere(etat);
   }

@@ -14,7 +14,7 @@ import {
   isOurToolCall,
 } from '../src/collision.js';
 import { normPath, selectVictims } from '../src/prockill-pure.js';
-import { buildSpec, DEFAULT_BACKEND, CAP_OBLIGATOIRE } from '../src/spec.js';
+import { buildSpec, DEFAULT_BACKEND, CAP_OBLIGATOIRE, verdictConfiguration } from '../src/spec.js';
 import { resolveShellSpawn } from '../src/spawn-cmd.js';
 
 // ========================= collision.js =========================
@@ -335,4 +335,53 @@ test('property : isOurToolCall(proxy_<injecte>) est vrai quelles que soient les 
       expect(isOurToolCall(FALLBACK_PREFIX + name, collisions)).toBe(true);
     })
   );
+});
+
+
+// ========================= spec.js — playwrightConfig (fichier --config officiel, 05/09/2026) =========
+test('verdictConfiguration : objet libre ACCEPTE et CLONE (langue, fuseau, ecran, flags Chrome)', () => {
+  const cfg = { browser: { launchOptions: { args: ['--lang=fr-FR'] }, contextOptions: { locale: 'fr-FR', timezoneId: 'Europe/Paris', viewport: { width: 1366, height: 768 } } }, timeouts: { action: 5000 } };
+  const v = verdictConfiguration(cfg);
+  expect(v).toEqual({ ok: true, configuration: cfg });
+  expect(/** @type {{configuration:object}} */ (v).configuration, 'clone, jamais la meme reference').not.toBe(cfg);
+});
+
+test('verdictConfiguration : chaque cle RESERVEE au proxy est refusee et NOMMEE', () => {
+  for (const k of ['server', 'capabilities', 'sharedBrowserContext', 'extension']) {
+    const v = verdictConfiguration({ [k]: 1 });
+    expect(v.ok).toBe(false);
+    expect(/** @type {{raison:string}} */ (v).raison).toBe(`playwrightConfig.${k} est decide par le proxy (interdit dans le fichier)`);
+  }
+  for (const k of ['userDataDir', 'isolated', 'cdpEndpoint', 'remoteEndpoint']) {
+    const v = verdictConfiguration({ browser: { [k]: 'x' } });
+    expect(v.ok).toBe(false);
+    expect(/** @type {{raison:string}} */ (v).raison).toBe(`playwrightConfig.browser.${k} est decide par le proxy (dossier d'instance / mode)`);
+  }
+});
+
+test('verdictConfiguration : non-objet, browser non-objet, args Chrome non-chaines ⇒ refus nomme', () => {
+  expect(verdictConfiguration(null).ok).toBe(false);
+  expect(verdictConfiguration([]).ok).toBe(false);
+  expect(verdictConfiguration('x').ok).toBe(false);
+  expect(/** @type {{raison:string}} */ (verdictConfiguration({ browser: [] })).raison).toBe('playwrightConfig.browser doit etre un objet');
+  expect(/** @type {{raison:string}} */ (verdictConfiguration({ browser: { launchOptions: { args: [1] } } })).raison).toBe('playwrightConfig.browser.launchOptions.args doit etre un tableau de chaines (flags Chrome)');
+  expect(verdictConfiguration({ browser: { launchOptions: { args: ['--a'] } } }).ok).toBe(true);
+  expect(verdictConfiguration({ browser: { launchOptions: {} } }).ok).toBe(true);
+});
+
+test('buildSpec : configuration = playwrightConfig du profil, sinon global, sinon null — jamais dans args', () => {
+  const g = { playwrightConfig: { browser: { contextOptions: { locale: 'en-US' } } } };
+  const p = { playwrightConfig: { browser: { contextOptions: { locale: 'fr-FR' } } } };
+  expect(buildSpec('a', p, g).configuration).toEqual(p.playwrightConfig);
+  expect(buildSpec('a', {}, g).configuration).toEqual(g.playwrightConfig);
+  expect(buildSpec('a', {}, {}).configuration).toBe(null);
+  expect(buildSpec('a', p, g).args.some((x) => x.includes('config')), 'le chemin du fichier est une valeur RUNTIME du daemon').toBe(false);
+});
+
+test('PROPERTY : verdictConfiguration est TOTALE et un ok rend toujours un clone JSON egal', () => {
+  fc.assert(fc.property(fc.anything(), (x) => {
+    const v = verdictConfiguration(x);
+    if (v.ok) return JSON.stringify(/** @type {{configuration:object}} */ (v).configuration) === JSON.stringify(x);
+    return typeof (/** @type {{raison:string}} */ (v).raison) === 'string';
+  }));
 });

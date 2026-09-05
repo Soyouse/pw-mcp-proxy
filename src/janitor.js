@@ -105,7 +105,8 @@ export function purgerInstancesOrphelines(instancesDir) {
     return supprimes; // absent = rien a purger, c'est le cas sain
   }
   for (const e of entrees) {
-    if (!e.isDirectory()) continue;
+    // Un dossier d'instance, ou le fichier `--config` ecrit a cote de lui (`<id>.config.json`) : rien d'autre.
+    if (!e.isDirectory() && !(e.isFile() && e.name.endsWith('.config.json'))) continue;
     const p = path.join(instancesDir, e.name);
     try { fs.rmSync(p, { recursive: true, force: true }); supprimes.push(p); }
     catch (err) { log(`[concierge] instance orpheline non supprimee ${p}: ${describeError(err)}`); }

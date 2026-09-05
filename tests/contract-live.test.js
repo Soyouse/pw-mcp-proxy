@@ -322,3 +322,21 @@ test.skipIf(!LIVE)('LIVE S8 : un cookie posé dans le profil A est INVISIBLE dep
     for (const b of backends) { try { b.stop(); } catch {} }
   }
 }, 240000);
+
+
+// ═══ EMPREINTE D'IDENTITÉ — `playwrightConfig` ⇒ fichier --config ⇒ le vrai Chrome l'APPLIQUE ═════
+// Preuve sur le binaire : langue, fuseau, écran et un flag Chrome (`--lang`) lus DANS LA PAGE. Un
+// compte français en fuseau UTC sur un écran de serveur est un employé virtuel qui sent le robot.
+test.skipIf(!LIVE)('LIVE empreinte : locale fr-FR, fuseau Europe/Paris, écran 1366x768 et flag Chrome appliqués via --config', async () => {
+  const playwrightConfig = { browser: { launchOptions: { args: ['--lang=fr-FR'] }, contextOptions: { locale: 'fr-FR', timezoneId: 'Europe/Paris', viewport: { width: 1366, height: 768 } } } };
+  const spec = buildSpec('empreinte', { isolated: true, args: ['--headless'], playwrightConfig, backend: BACKEND }, {});
+  expect(spec.configuration).toEqual(playwrightConfig);
+  const A = await instancePour('empreinte', spec);
+  const a = backendQuiRepond('empreinte', A.url, spec);
+  await a.start(CLIENT);
+  await call(a, 'browser_navigate', { url: `${origin}/a` });
+  const ev = texte(await call(a, 'browser_evaluate', { function: '() => JSON.stringify({ lang: navigator.language, tz: Intl.DateTimeFormat().resolvedOptions().timeZone, w: window.innerWidth, h: window.innerHeight })' }));
+  // Le résultat d'evaluate est une chaîne JSON ré-échappée par le serveur : on lit les VALEURS, pas les guillemets.
+  for (const attendu of ['fr-FR', 'Europe/Paris', '1366', '768']) expect(ev, 'valeur appliquee dans la page : ' + attendu).toContain(attendu);
+  a.stop();
+}, 120000);
