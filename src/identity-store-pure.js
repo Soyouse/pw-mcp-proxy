@@ -98,6 +98,35 @@ export function cheminsCoffre(cfg, os, join) {
   };
 }
 
+/**
+ * Quels PROCESS tiennent encore ce dossier d'instance ? (leur ligne de commande le nomme en
+ * `--user-data-dir`). MESURÉ sur Linux le 05/09/2026 : Chrome est lancé par Playwright dans SON
+ * PROPRE groupe (`setsid`), donc le SIGKILL du groupe du gardien ne l'atteint pas ; il survit ~0,5 s,
+ * se ferme proprement et RÉÉCRIT dans son `--user-data-dir` — recréant le dossier d'instance APRÈS
+ * notre rename/snapshot/rm (dossier fantôme à vie, snapshot pris avant le dernier flush). Windows
+ * masquait le défaut par ses verrous de fichiers. La bonne question est donc « qui tient encore ce
+ * dossier ? », et le noyau y répond PID par PID (`kill(pid, 0)`), pas « le rename passe-t-il ? ».
+ * ⚠️ Frontière de jeton : `live-1` ne doit JAMAIS matcher `live-10` (ou l'attente durerait tout le
+ * budget d'un autre navigateur). Séparateur-agnostique (normPath) comme `selectVictims`.
+ * @param {Array<{pid:number, cmd:string}>} procs sortie de `listProcesses()`
+ * @param {string} instanceDir
+ * @param {number} selfPid jamais soi-même
+ * @returns {number[]}
+ */
+export function tenantsDuDossier(procs, instanceDir, selfPid) {
+  const cible = normPath(instanceDir);
+  if (cible.length === 0) return [];
+  // Frontieres de JETON des deux cotes : avant = debut, espace, `=`, guillemet ; apres = fin, espace,
+  // guillemet, `/`. Ainsi `/tmp/inst/live-1` ne matche ni `live-10`, ni `C:/tmp/inst/live-1`.
+  const rx = new RegExp(`(?:^|[ ="'])${cible.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[ "'/])`);
+  const out = [];
+  for (const p of Array.isArray(procs) ? procs : []) {
+    if (!p || p.pid === selfPid || typeof p.cmd !== 'string') continue;
+    if (rx.test(normPath(p.cmd))) out.push(p.pid);
+  }
+  return out;
+}
+
 const MIB = 1024 * 1024;
 
 /**

@@ -4,6 +4,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ## [Unreleased]
 
+### Fixed — instance cleanup on POSIX waited for the wrong fact (2026-09-05)
+- Found by the nightly live suite on Ubuntu, reproduced on a Linux host: Playwright starts Chrome in
+  its own process group, so killing the guard's group leaves Chrome alive for ~0.5 s; it then shuts
+  down cleanly and writes into its `--user-data-dir` **after** the daemon had renamed, snapshotted
+  and removed the instance directory (POSIX has no file locks to stop the rename). Result: a ghost
+  instance directory left forever and a snapshot taken before Chrome's final flush. Windows hid the
+  defect through its file locks.
+- `attendreLibre` now lists the processes whose command line names the instance directory (pure
+  `tenantsDuDossier`, token-bounded so `live-1` never matches `live-10`), asks the kernel PID by PID
+  whether they are still alive, and only renames once they are all gone. Same single declared delay.
+
 ### Changed — config hot-reload driven by kernel events (2026-09-05)
 - `profiles.json` is now watched with `fs.watch` on its **parent directory** (inode caveat from the
   Node docs: an atomic save replaces the file's inode and silently kills a watch placed on the file)

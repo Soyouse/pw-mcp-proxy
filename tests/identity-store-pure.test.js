@@ -14,6 +14,7 @@ import {
   instanceId,
   lirePlafonds,
   verdictSnapshot,
+  tenantsDuDossier,
   planEviction,
   cheminsCoffre,
 } from '../src/identity-store-pure.js';
@@ -313,4 +314,38 @@ test('MUTATION : à usage égal, l ordre d ENTRÉE ne compte pas — trois noms,
   const now = 100 * JOUR;
   const r = planEviction([E('c', 5 * MIB, now), E('a', 5 * MIB, now), E('b', 5 * MIB, now)], { maxTotalMo: 11 }, now);
   expect(r.evincer).toEqual([{ identite: 'a', motif: 'plafond-total' }]);
+});
+
+// ── tenantsDuDossier (05/09/2026, défaut Linux du nightly : Chrome survit au kill du groupe) ──
+test('tenantsDuDossier : le process dont la cmdline nomme le dossier (=, espace, guillemets, séparateurs) est un tenant', () => {
+  const procs = [
+    { pid: 10, cmd: '/opt/google/chrome/chrome --user-data-dir=/tmp/inst/live-1 --headless' },
+    { pid: 11, cmd: 'node playwright-mcp --user-data-dir /tmp/inst/live-1 --host localhost' },
+    { pid: 12, cmd: '"C:\\Program Files\\Google\\Chrome\\chrome.exe" --user-data-dir="C:\\tmp\\inst\\live-1" --flag' },
+    { pid: 13, cmd: 'chrome --user-data-dir=/tmp/inst/live-1' },
+    { pid: 14, cmd: 'chrome --user-data-dir=/tmp/inst/live-1/' },
+  ];
+  expect(tenantsDuDossier(procs, '/tmp/inst/live-1', 999)).toEqual([10, 11, 13, 14]);
+  expect(tenantsDuDossier(procs, 'C:\\tmp\\inst\\live-1', 999)).toEqual([12]);
+});
+
+test('tenantsDuDossier : live-1 ne matche JAMAIS live-10, ni soi-même, ni une entrée malformée', () => {
+  const procs = [
+    { pid: 20, cmd: 'chrome --user-data-dir=/tmp/inst/live-10' },
+    { pid: 21, cmd: 'chrome --user-data-dir=/tmp/inst/live-1' },
+    { pid: 22, cmd: 'chrome --user-data-dir=/tmp/inst/live-10 --autre /tmp/inst/live-1' },
+    null, { pid: 23 }, { pid: 24, cmd: 42 },
+  ];
+  expect(tenantsDuDossier(procs, '/tmp/inst/live-1', 21)).toEqual([22]);
+  expect(tenantsDuDossier(procs, '/tmp/inst/live-1', 999)).toEqual([21, 22]);
+  expect(tenantsDuDossier(procs, '', 999)).toEqual([]);
+  expect(tenantsDuDossier(undefined, '/tmp/inst/live-1', 999)).toEqual([]);
+});
+
+test('PROPERTY : tenantsDuDossier — un chemin qui n est qu un PRÉFIXE d un autre ne tient jamais', () => {
+  fc.assert(fc.property(fc.stringMatching(/^[a-z0-9]{1,8}$/), fc.stringMatching(/^[a-z0-9]{1,4}$/), (nom, suffixe) => {
+    const dir = `/tmp/inst/${nom}`;
+    const procs = [{ pid: 1, cmd: `chrome --user-data-dir=${dir}${suffixe}` }, { pid: 2, cmd: `chrome --user-data-dir=${dir}` }];
+    return JSON.stringify(tenantsDuDossier(procs, dir, 0)) === JSON.stringify([2]);
+  }));
 });

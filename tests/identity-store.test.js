@@ -13,6 +13,7 @@ import {
   supprimerInstance,
   mesurer,
   evincer,
+  attendreLibre,
 } from '../src/identity-store.js';
 
 const dirsToClean = [];
@@ -321,4 +322,45 @@ test('supprimerInstance idempotent — dossier existant puis déjà absent, jama
 
   expect(() => supprimerInstance(instanceDir)).not.toThrow(); // déjà absent : idempotent
   expect(() => supprimerInstance(path.join(instanceDir, 'inexistant-imbrique'))).not.toThrow();
+});
+
+
+// ═══ attendreLibre — le rangement attend la MORT RÉELLE des tenants (défaut Linux du 05/09/2026) ═══
+// Chrome (petit-enfant, dans son propre groupe) survit au kill du gardien et réécrit dans son
+// dossier : un rename immédiat rangeait un snapshot avant son dernier flush et laissait un dossier
+// fantôme. Ici on prouve : ① tant qu'un tenant est vivant, AUCUN rename ② dès qu'il meurt, rename
+// ③ budget épuisé sous un tenant vivant ⇒ null, rien touché, PID nommé dans le log ④ un homonyme
+// (`live-10`) n'est pas un tenant ⑤ sans tenant, rename immédiat.
+test('attendreLibre : n\'agit qu\'après la mort du tenant (noyau interrogé PID par PID), puis renomme', async () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pw-att-')), 'live-1');
+  fs.mkdirSync(dir);
+  let sondes = 0;
+  const vivant = (pid) => { sondes++; return pid === 4242 && sondes < 4; }; // vivant aux 3 premières sondes
+  const enumerer = () => [{ pid: 4242, cmd: `chrome --user-data-dir=${dir}` }, { pid: 5, cmd: `chrome --user-data-dir=${dir}0` }];
+  const rendu = await attendreLibre(dir, { pasMs: 1, budgetMs: 5000, enumerer, vivant, selfPid: 1 });
+  expect(rendu).toBe(`${dir}.fini`);
+  expect(fs.existsSync(dir)).toBe(false);
+  expect(fs.existsSync(`${dir}.fini`)).toBe(true);
+  expect(sondes, 'seul le VRAI tenant (4242) est sondé, jamais l homonyme live-10').toBe(4);
+  fs.rmSync(path.dirname(dir), { recursive: true, force: true });
+});
+
+test('attendreLibre : tenant qui ne meurt pas dans le budget ⇒ null, dossier INTACT, PID nommé', async () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pw-att-')), 'live-1');
+  fs.mkdirSync(dir);
+  const rendu = await attendreLibre(dir, { pasMs: 1, budgetMs: 20, enumerer: () => [{ pid: 777, cmd: `x --user-data-dir=${dir}` }], vivant: () => true, selfPid: 1 });
+  expect(rendu).toBe(null);
+  expect(fs.existsSync(dir), 'jamais renommé sous un process vivant').toBe(true);
+  expect(fs.existsSync(`${dir}.fini`)).toBe(false);
+  fs.rmSync(path.dirname(dir), { recursive: true, force: true });
+});
+
+test('attendreLibre : aucun tenant ⇒ rename immédiat, zéro sonde', async () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pw-att-')), 'live-1');
+  fs.mkdirSync(dir);
+  let sondes = 0;
+  const rendu = await attendreLibre(dir, { pasMs: 1, budgetMs: 1000, enumerer: () => [], vivant: () => { sondes++; return true; }, selfPid: 1 });
+  expect(rendu).toBe(`${dir}.fini`);
+  expect(sondes).toBe(0);
+  fs.rmSync(path.dirname(dir), { recursive: true, force: true });
 });

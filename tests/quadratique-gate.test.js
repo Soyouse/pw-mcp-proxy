@@ -48,6 +48,14 @@ const CLASSES = new Set(['O(N)', 'O(N log N)', 'DETTE', 'DETTE_HERITEE']);
 
 const BUDGET = {
   'src/http-transport.js': { max: 2, classe: 'DETTE_HERITEE' },
+  // Posé le 05/09/2026 (`attendreLibre`) : la boucle de sondage relit `tenants.filter(vivant)` — les
+  // tenants sont les PID qui nomment UN dossier d'instance (un Chrome + son serveur : 2-3 process,
+  // bornés par l'instance, jamais par la flotte), et le nombre de tours est borné par le budget.
+  'src/identity-store.js': {
+    max: 1,
+    classe: 'O(N)',
+    pourquoi: 'sondage des tenants d UN dossier d instance (2-3 PID, bornés par l instance et non par la flotte) répété au pas du budget de libération : linéaire en tours × tenants, jamais un produit de deux collections',
+  },
   'src/janitor-pure.js': { max: 3, classe: 'DETTE_HERITEE' },
   'src/janitor.js': { max: 1, classe: 'DETTE_HERITEE' },
   'src/jsonrpc.js': { max: 1, classe: 'DETTE_HERITEE' },

@@ -16,7 +16,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { log } from './logger.js';
 import { describeError } from './error-detail.js';
-import { estExclu, nomIdentiteValide, verdictSnapshot } from './identity-store-pure.js';
+import { estExclu, nomIdentiteValide, verdictSnapshot, tenantsDuDossier } from './identity-store-pure.js';
+import { listProcesses, isPidAlive } from './prockill.js';
 // ⚠️ SOURCE UNIQUE des delais (budget.js) — cf `attendreLibre`, le SEUL appel temporel de ce fichier.
 import { LIBERATION_BUDGET_MS, LIBERATION_POLL_MS } from './budget.js';
 
@@ -195,32 +196,46 @@ export async function snapshotRetour({ identite, storeDir, instanceDir, plafonds
  * 🛑 POURQUOI UN DÉLAI ICI, ET POURQUOI IL EST RECEVABLE (motif `distant`, budget no-inference) :
  * l'`exit` que reçoit le daemon est celui du GARDIEN, son enfant. Chrome est un PETIT-ENFANT : sa
  * mort ne nous est délivrée par AUCUN événement (doc Node : les petits-enfants ne sont ni tués ni
- * notifiés avec leur parent), et sous Windows ses fichiers restent VERROUILLÉS jusqu'à sa
- * disparition effective. Aucune autorité joignable ⇒ on OBSERVE le seul fait disponible : un
- * `rename` de dossier ÉCHOUE tant qu'un handle est ouvert (sémantique Windows) et RÉUSSIT sinon.
- * Sur POSIX il réussit du premier coup (aucun verrou) — le délai n'y tourne jamais.
- * ⚠️ Le renommage n'est pas qu'un test : c'est aussi ce qui garantit qu'aucun nouveau process ne
- * retrouvera ce dossier sous son nom d'instance pendant qu'on le range.
+ * notifiés avec leur parent). Aucune autorité n'ÉMET ce fait ⇒ on l'INTERROGE : le noyau répond
+ * exactement, PID par PID (`kill(pid, 0)`), pour chaque process dont la ligne de commande nomme ce
+ * dossier (`tenantsDuDossier`, PUR). Tant qu'un tenant vit, on ne touche à rien.
+ * 🔴 MESURÉ sur Linux le 05/09/2026 (nightly rouge, reproduit sur le VPS) : Playwright lance Chrome
+ * dans SON PROPRE groupe ⇒ le SIGKILL du groupe du gardien ne l'atteint pas ; il survit ~0,5 s, se
+ * ferme proprement et RÉÉCRIT dans son `--user-data-dir` ⇒ un rename immédiat (POSIX ne verrouille
+ * pas) rangeait un snapshot AVANT le dernier flush et laissait un dossier d'instance FANTÔME recréé
+ * après le rm. Windows masquait le défaut : ses verrous faisaient échouer le rename jusqu'à la mort
+ * effective de Chrome. Le rename reste le 2e fait (verrous Windows) ET ce qui garantit qu'aucun
+ * nouveau process ne retrouvera ce dossier sous son nom d'instance pendant qu'on le range.
+ * ⚠️ UN SEUL appel temporel (la pause), UNE SEULE comparaison de budget : cliquet no-inference.
  * @param {string} instanceDir
- * @param {{budgetMs?:number, pasMs?:number}} [opts]
- * @returns {Promise<string|null>}
+ * @param {{budgetMs?:number, pasMs?:number, enumerer?:()=>Array<{pid:number,cmd:string}>, vivant?:(pid:number)=>boolean, selfPid?:number}} [opts]
+ * @returns {Promise<string|null>} le chemin RENDU (`<dir>.fini`), ou `null` si le dossier reste tenu
  */
-export async function attendreLibre(instanceDir, { budgetMs = LIBERATION_BUDGET_MS, pasMs = LIBERATION_POLL_MS } = {}) {
+export async function attendreLibre(instanceDir, { budgetMs = LIBERATION_BUDGET_MS, pasMs = LIBERATION_POLL_MS, enumerer = listProcesses, vivant = isPidAlive, selfPid = process.pid } = {}) {
   const cible = `${instanceDir}.fini`;
+  // Énumération UNE fois (spawn bloquant) : les tenants sont ceux qui existaient au moment du kill ;
+  // ensuite on n'interroge plus que le noyau sur ces PID (bon marché, exact).
+  const tenants = tenantsDuDossier(enumerer(), instanceDir, selfPid);
   const t0 = Date.now();
   for (;;) {
-    try {
-      fs.renameSync(instanceDir, cible);
-      return cible;
-    } catch (e) {
-      // ENOENT = deja disparu (rien a ranger) : on rend la cible absente, l'appelant verra un dossier vide.
-      if (e?.code === 'ENOENT') { try { fs.mkdirSync(cible, { recursive: true }); } catch { /* SILENCE: la cible existe deja (course benigne avec un rangement precedent) — un dossier present est exactement ce qu'on voulait */ } return cible; }
-      if (Date.now() - t0 > budgetMs) {
-        log(`identity-store: ${instanceDir} toujours verrouillé après ${budgetMs} ms — ${describeError(e)}`);
-        return null;
+    const encore = tenants.filter((pid) => vivant(pid));
+    /** @type {unknown} */
+    let erreur = null;
+    if (encore.length === 0) {
+      try {
+        fs.renameSync(instanceDir, cible);
+        return cible;
+      } catch (e) {
+        // ENOENT = deja disparu (rien a ranger) : on rend la cible absente, l'appelant verra un dossier vide.
+        if (/** @type {{code?:string}} */ (e)?.code === 'ENOENT') { try { fs.mkdirSync(cible, { recursive: true }); } catch { /* SILENCE: la cible existe deja (course benigne avec un rangement precedent) — un dossier present est exactement ce qu'on voulait */ } return cible; }
+        erreur = e;
       }
-      await new Promise((r) => setTimeout(r, pasMs));
     }
+    if (Date.now() - t0 > budgetMs) {
+      log(`identity-store: ${instanceDir} toujours tenu après ${budgetMs} ms — ${encore.length ? `process vivants : ${encore.join(', ')}` : describeError(erreur)}`);
+      return null;
+    }
+    await new Promise((r) => setTimeout(r, pasMs));
   }
 }
 
