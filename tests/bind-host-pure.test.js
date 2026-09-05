@@ -98,3 +98,40 @@ test('PROPERTY sécurité : une adresse ROUTABLE n est JAMAIS admise, quelles qu
     { numRuns: 500 }
   );
 });
+
+// ── Tests nés du rapport de mutation CI du 05/09/2026 (18 survivants : chaque borne de classe) ──
+test('MUTATION : chaque octet de chaque classe est une BORNE, pas une coïncidence', () => {
+  // lien-local exige 169 ET 254
+  expect(classeAdresse('169.0.0.1')).toBe('routable');
+  expect(classeAdresse('8.254.1.1')).toBe('routable');
+  expect(classeAdresse('10.254.0.1')).toBe('prive');
+  // 172.16/12 : 16..31 inclus, 15 et 32 exclus, et le 172 est obligatoire
+  expect(classeAdresse('172.15.0.1')).toBe('routable');
+  expect(classeAdresse('172.16.0.1')).toBe('prive');
+  expect(classeAdresse('172.31.255.255')).toBe('prive');
+  expect(classeAdresse('172.32.0.1')).toBe('routable');
+  expect(classeAdresse('8.20.0.1')).toBe('routable');
+  // 192.168/16 : les deux octets
+  expect(classeAdresse('192.167.0.1')).toBe('routable');
+  expect(classeAdresse('192.0.0.1')).toBe('routable');
+  expect(classeAdresse('11.168.0.1')).toBe('routable');
+  expect(classeAdresse('192.168.0.1')).toBe('prive');
+  // ancres de la regex : rien avant, rien après
+  expect(classeAdresse('1.2.3.4x')).toBe(null);
+  expect(classeAdresse('x1.2.3.4')).toBe(null);
+  expect(classeAdresse(null)).toBe(null);
+});
+
+test('MUTATION : carte déclarée VIDE = non déclarée ; interfaces absentes = carte inconnue, jamais un throw', () => {
+  const vide = verdictBindHost('10.87.87.1', { interfaceDeclaree: '', interfaces: IFACES });
+  expect(vide.ok).toBe(false);
+  expect(vide.raison).toMatch(/bindHostInterface/);
+  const sansMesure = verdictBindHost('10.87.87.1', { interfaceDeclaree: 'ctxroute' });
+  expect(sansMesure.ok).toBe(false);
+  expect(sansMesure.raison).toMatch(/aucune carte de ce nom/);
+});
+
+test('MUTATION : il suffit qu UNE adresse de la carte corresponde (some, pas every)', () => {
+  const ifaces = { double: [{ address: 'fe80::1' }, { address: '10.5.5.5' }] };
+  expect(verdictBindHost('10.5.5.5', { interfaceDeclaree: 'double', interfaces: ifaces })).toEqual({ ok: true, classe: 'isole' });
+});

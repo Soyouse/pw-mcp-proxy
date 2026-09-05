@@ -269,3 +269,48 @@ test('PROPERTY : une identité n apparaît qu UNE fois dans le plan, et jamais a
     { numRuns: 300 }
   );
 });
+
+// ── Tests nés du rapport de mutation CI du 05/09/2026 (48 survivants sur les 2 modules du chantier) ──
+test('MUTATION : la paire Service Worker/CacheStorage exige les DEUX segments, et survit à un double slash', () => {
+  expect(estExclu('Foo/CacheStorage'), 'CacheStorage seul hors Service Worker = de l état, conservé').toBe(false);
+  expect(estExclu('Service Worker//CacheStorage'), 'normPath ne replie pas // : le filtre des vides rend la paire adjacente').toBe(true);
+  expect(estExclu('Service Worker/Autre/CacheStorage'), 'non adjacent = conservé').toBe(false);
+});
+
+test('MUTATION : instances.dir vide ⇒ défaut (champ instances, pas seulement identityStore)', () => {
+  expect(cheminsCoffre({ instances: { dir: '' } }, OS, join).instancesDir).toBe('/tmp/pw-mcp-instances');
+  expect(cheminsCoffre('chaine', OS, join)).toEqual({ storeDir: '/home/u/.pw-identities', instancesDir: '/tmp/pw-mcp-instances' });
+  expect(cheminsCoffre(null, OS, join).storeDir).toBe('/home/u/.pw-identities');
+});
+
+test('MUTATION : la raison du refus porte la taille RÉELLE en Mo (division, pas multiplication)', () => {
+  const v = verdictSnapshot(301 * MIB, { maxParIdentiteMo: 300 });
+  expect(v.ok).toBe(false);
+  expect(/** @type {{raison:string}} */ (v).raison).toMatch(/^snapshot de 301 Mo > plafond maxParIdentiteMo=300 Mo/);
+});
+
+test('MUTATION : une entrée au nom VIDE est ignorée même si elle est vieille (jamais un plan sur "")', () => {
+  const now = 100 * JOUR;
+  const r = planEviction([E('', 5 * MIB, now - 90 * JOUR)], {}, now);
+  expect(r.evincer).toEqual([]);
+});
+
+test('MUTATION : octets illisibles (NaN) ou négatifs comptent 0, et le plafond total reste décidable', () => {
+  const now = 100 * JOUR;
+  const r = planEviction([E('a', NaN, now - JOUR), E('b', 2 * MIB, now)], { maxTotalMo: 1 }, now);
+  expect(r.evincer).toEqual([{ identite: 'a', motif: 'plafond-total' }, { identite: 'b', motif: 'plafond-total' }]);
+  const r2 = planEviction([E('neg', -5 * MIB, now), E('gros', 2 * MIB, now - JOUR)], { maxTotalMo: 1 }, now);
+  expect(r2.evincer, 'un négatif ne « rembourse » pas le plafond').toEqual([{ identite: 'gros', motif: 'plafond-total' }]);
+});
+
+test('MUTATION : total PILE au plafond ⇒ aucune éviction ; un octet de plus ⇒ la plus vieille', () => {
+  const now = 100 * JOUR;
+  expect(planEviction([E('a', 1 * MIB, now - JOUR), E('b', 1 * MIB, now)], { maxTotalMo: 2 }, now).evincer).toEqual([]);
+  expect(planEviction([E('a', 1 * MIB, now - JOUR), E('b', 1 * MIB + 1, now)], { maxTotalMo: 2 }, now).evincer).toEqual([{ identite: 'a', motif: 'plafond-total' }]);
+});
+
+test('MUTATION : à usage égal, l ordre d ENTRÉE ne compte pas — trois noms, le plus petit part', () => {
+  const now = 100 * JOUR;
+  const r = planEviction([E('c', 5 * MIB, now), E('a', 5 * MIB, now), E('b', 5 * MIB, now)], { maxTotalMo: 11 }, now);
+  expect(r.evincer).toEqual([{ identite: 'a', motif: 'plafond-total' }]);
+});

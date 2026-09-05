@@ -19,7 +19,8 @@ const RX_V4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
 
 /** Classe d'une adresse IPv4 (chaine). `null` si ce n'est pas une IPv4 valide. */
 export function classeAdresse(hote) {
-  if (typeof hote !== 'string') return null;
+  // Pas de garde `typeof` : un non-string ne matche jamais RX_V4 (coercion en texte) ⇒ `null`. Une garde
+  // ici serait un mutant EQUIVALENT (prouve par Stryker le 05/09), donc supprimee a la source.
   if (hote === 'localhost' || hote === '::1') return 'loopback';
   const m = RX_V4.exec(hote);
   if (!m) return null;
@@ -49,7 +50,7 @@ export function verdictBindHost(hote, ctx = {}) {
   // prive : exige la carte declaree ET l'adresse mesuree dessus
   const carte = ctx.interfaceDeclaree;
   if (typeof carte !== 'string' || carte.length === 0) return { ok: false, raison: `bindHost "${hote}" est une adresse PRIVÉE : déclarer la carte dédiée qui la porte (bindHostInterface), sinon rien ne distingue une carte isolée d'un vrai LAN` };
-  const adresses = (ctx.interfaces && typeof ctx.interfaces === 'object' ? ctx.interfaces[carte] : null) || null;
+  const adresses = ctx.interfaces ? ctx.interfaces[carte] : null;
   if (!Array.isArray(adresses)) return { ok: false, raison: `bindHostInterface "${carte}" : aucune carte de ce nom sur cette machine` };
   if (!adresses.some((a) => a && a.address === hote)) return { ok: false, raison: `bindHost "${hote}" n'est PAS une adresse de la carte "${carte}" (mesuré sur les interfaces) — la config ne correspond pas à la machine` };
   return { ok: true, classe: 'isole' };

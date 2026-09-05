@@ -49,13 +49,11 @@ const PAIRE_EXCLUE = Object.freeze(['Service Worker', 'CacheStorage']);
  * @returns {boolean}
  */
 export function estExclu(cheminRelatif) {
-  if (typeof cheminRelatif !== 'string' || cheminRelatif.length === 0) return false;
+  if (typeof cheminRelatif !== 'string') return false; // '' ⇒ zero segment ⇒ false, sans garde dediee
+  // Le filtre des segments vides rend `Service Worker//CacheStorage` ADJACENT (normPath ne replie pas
+  // les `//`) : sans lui, un double slash ferait copier un cache. Teste explicitement.
   const segments = normPath(cheminRelatif).split('/').filter((s) => s.length > 0);
-  for (let i = 0; i < segments.length; i++) {
-    if (SEGMENTS_EXCLUS.has(segments[i])) return true;
-    if (segments[i] === PAIRE_EXCLUE[0] && segments[i + 1] === PAIRE_EXCLUE[1]) return true;
-  }
-  return false;
+  return segments.some((s, i) => SEGMENTS_EXCLUS.has(s) || (s === PAIRE_EXCLUE[0] && segments[i + 1] === PAIRE_EXCLUE[1]));
 }
 
 // Un nom d'identite devient un NOM DE DOSSIER (coffre + instances) : alphabet FERME, sinon un nom
@@ -89,9 +87,11 @@ export function instanceId(identite, n) {
  * @param {(...p:string[]) => string} join `path.join` injecte
  */
 export function cheminsCoffre(cfg, os, join) {
-  const c = cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : {};
-  const store = c.identityStore && typeof c.identityStore === 'object' ? c.identityStore : {};
-  const inst = c.instances && typeof c.instances === 'object' ? c.instances : {};
+  // Lire une propriete sur un primitif/tableau rend `undefined` ⇒ le defaut s'applique : les gardes
+  // `typeof === 'object'` etaient des mutants EQUIVALENTS (Stryker 05/09), supprimees a la source.
+  const c = cfg || {};
+  const store = c.identityStore || {};
+  const inst = c.instances || {};
   return {
     storeDir: typeof store.dir === 'string' && store.dir.length > 0 ? store.dir : join(os.homedir, '.pw-identities'),
     instancesDir: typeof inst.dir === 'string' && inst.dir.length > 0 ? inst.dir : join(os.tmpdir, 'pw-mcp-instances'),
@@ -108,7 +108,7 @@ const MIB = 1024 * 1024;
  * @returns {{maxParIdentiteMo:number, maxTotalMo:number, retentionJours:number}}
  */
 export function lirePlafonds(cfg) {
-  const c = cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : {};
+  const c = cfg || {}; // primitif/tableau ⇒ proprietes `undefined` ⇒ defauts (garde typeof = mutant equivalent)
   const entierPositif = (v, defaut) => (Number.isInteger(v) && v > 0 ? v : defaut);
   return {
     maxParIdentiteMo: entierPositif(c.maxParIdentiteMo, 300),
@@ -157,12 +157,15 @@ export function planEviction(entrees, plafonds, now) {
   const { maxParIdentiteMo, maxTotalMo, retentionJours } = lirePlafonds(plafonds);
   const horloge = Number.isFinite(now) ? now : 0;
   const lignes = [];
+  // Stryker disable ArrayDeclaration: le repli `[]` d'une entree non-tableau est INDISCERNABLE d'un tableau
+  // d'elements malformes (chacun est ignore par la validation ci-dessous) — mutant equivalent par construction.
   for (const e of Array.isArray(entrees) ? entrees : []) {
     if (!e || typeof e.identite !== 'string' || e.identite.length === 0) continue;
-    const octets = Number.isFinite(e.octets) && e.octets > 0 ? e.octets : 0;
+    const octets = Number.isFinite(e.octets) ? Math.max(0, e.octets) : 0;
     const usage = Number.isFinite(e.dernierUsageMs) ? e.dernierUsageMs : horloge;
     lignes.push({ identite: e.identite, octets, usage });
   }
+  // Stryker restore ArrayDeclaration
   /** @type {Array<{identite:string, motif:'retention'|'plafond-total'}>} */
   const evincer = [];
   /** @type {string[]} */
@@ -175,13 +178,15 @@ export function planEviction(entrees, plafonds, now) {
   }
   // Tri UNIQUE (O(N log N)) puis UN parcours : l'eviction par plafond total ne compare jamais
   // deux entrees entre elles apres ce tri (« la complexite se declare »).
-  survivantes.sort((a, b) => a.usage - b.usage || (a.identite < b.identite ? -1 : a.identite > b.identite ? 1 : 0));
+  // Depart par le nom : `localeCompare` (alphabet ASCII ferme ⇒ deterministe), aucun operateur a muter.
+  survivantes.sort((a, b) => a.usage - b.usage || a.identite.localeCompare(b.identite));
   let total = 0;
   for (const l of survivantes) total += l.octets;
   const plafondOctets = maxTotalMo * MIB;
-  for (let i = 0; i < survivantes.length && total > plafondOctets; i++) {
-    total -= survivantes[i].octets;
-    evincer.push({ identite: survivantes[i].identite, motif: 'plafond-total' });
+  for (const l of survivantes) {
+    if (total <= plafondOctets) break; // pile au plafond = conforme, rien a evincer
+    total -= l.octets;
+    evincer.push({ identite: l.identite, motif: 'plafond-total' });
   }
   return { evincer, depassent };
 }

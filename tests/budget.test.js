@@ -12,6 +12,9 @@ import {
   handshakeBudgetMs,
   handshakeFitsBudget,
   READY_TIMEOUT_MS,
+  CONNECT_RETRY_SCHEDULE_MS,
+  CONNECT_ATTEMPTS,
+  CONFIG_READ_RETRY_SCHEDULE_MS,
 } from '../src/budget.js';
 
 // ---------- heritage du budget client ----------
@@ -73,3 +76,10 @@ test('HANDSHAKE_RATIO : degrade TARD, jamais par prudence (>= 0.5)', () => {
 });
 
 // ---------- peremption d'une entree 'starting' ----------
+
+// ── Calendriers de rejeu (05/09/2026) : valeurs EXACTES, copiées de budget.js, jamais lues du module ──
+test('calendriers de rejeu : connect [1000, 2000] ⇒ 3 essais ; lecture config [100, 500, 2000]', () => {
+  expect([...CONNECT_RETRY_SCHEDULE_MS]).toEqual([1000, 2000]);
+  expect(CONNECT_ATTEMPTS).toBe(3);
+  expect([...CONFIG_READ_RETRY_SCHEDULE_MS]).toEqual([100, 500, 2000]);
+});
