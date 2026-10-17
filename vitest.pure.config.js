@@ -28,6 +28,7 @@ export default defineConfig({
       'tests/identity-store-pure.test.js', // decision du coffre d identites (filtre, eviction, plafonds) — PURE + property
       'tests/bind-host-pure.test.js', // decision de l adresse d ecoute (jamais routable) — PURE + property
       'tests/config-watch-pure.test.js', // decision du rechargement de config (empreinte, evenement, rejeu) — PURE + property
+      'tests/handshake-cache-pure.test.js', // decision du souvenir de handshake (cle, plafond, eviction) — PURE + property
     ],
     globals: false,
   },

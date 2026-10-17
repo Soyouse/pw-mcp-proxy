@@ -20,6 +20,8 @@ import { clientBudgetMs, handshakeBudgetMs } from './budget.js';
 import { describeError } from './error-detail.js';
 // ⚠️ SOURCE UNIQUE du repli de version MCP (3 copies avant l'audit du 03/08).
 import { PROTOCOL_FALLBACK } from './protocol.js';
+// SOUVENIR de handshake (17/10/2026) : servir initialize/tools/list SANS allumer le backend.
+import { SouvenirHandshake } from './handshake-cache.js';
 
 
 
@@ -36,6 +38,10 @@ export class Router {
     this._idCounter = 0;
     this._alertedCollisions = new Set(); // noms deja signales (anti-spam d'alerte sur chaque tools/list)
     this._collisions = []; // collisions vues au dernier tools/list (route l'interception, cf _handleClientRequest)
+    // 🛑 SOUVENIR de handshake (options.cache = handshake-cache.ouvrirCache, cable par index.js).
+    // Absent (tests, harnais) => comportement d'avant, a l'identique : chaque handshake allume le
+    // backend. Present => une session qui ne touche jamais au navigateur n'allume JAMAIS Playwright.
+    this._souvenir = options.cache ? new SouvenirHandshake(options.cache, manager) : null;
     manager.onNewBackend = (b) => this._wire(b);
     manager.onConfigChange = () => this.notifyToolsChanged();
   }
@@ -85,6 +91,10 @@ export class Router {
 
   async _handleClientNotification(msg) {
     if (msg.method === 'notifications/initialized') return; // consomme par le proxy (handshake par hop)
+    // ⚠️ Mode souvenir + aucun backend : il n'y a personne a prevenir (aucune requete n'a ete relayee,
+    // et un backend qui demarrera refera son propre handshake). Relayer ALLUMERAIT Playwright pour
+    // une notification — exactement ce que le souvenir evite.
+    if (this._souvenir?.froid()) return;
     try {
       const b = await this.manager.active();
       b.forwardNotification(msg);
@@ -114,6 +124,9 @@ export class Router {
     try {
       const b = await this.manager.active();
       b.forwardRequest(msg);
+      // Le backend vient (peut-etre) de s'allumer apres un handshake servi de memoire : confronter.
+      // ⚠️ NE JAMAIS retirer : c'est ce qui corrige seul un souvenir perime (cf SouvenirHandshake).
+      this._souvenir?.confronter(b, () => this._collectBackendTools(b), () => this.notifyToolsChanged());
     } catch (e) {
       this._send({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: `backend actif indisponible: ${describeError(e)}` } });
     }
@@ -134,19 +147,16 @@ export class Router {
       capabilities: p.capabilities || {},
       clientInfo: p.clientInfo || { name: 'unknown', version: '0' },
     };
+    // SOUVENIR : la reponse que le backend a deja donnee pour cette commande => aucun allumage.
+    const memo = this._souvenir?.init();
+    if (memo) return this._send({ jsonrpc: '2.0', id: msg.id, result: this._resultatInit(memo) });
     const pending = this.manager.active();
     const raced = await withDeadline(pending, this._handshakeBudgetMs);
     let result;
     if (raced.ok) {
       const b = raced.value;
-      const caps = structuredClone(b.initResult?.capabilities || {});
-      caps.tools = { ...(caps.tools || {}), listChanged: true }; // on garantit la propagation des updates
-      result = {
-        protocolVersion: b.initResult?.protocolVersion || this.manager.clientInfo.protocolVersion,
-        capabilities: caps,
-        serverInfo: { name: 'pw-mcp-proxy', version: this.version, title: 'Playwright MCP multi-profil' },
-        ...(b.initResult?.instructions ? { instructions: b.initResult.instructions } : {}),
-      };
+      result = this._resultatInit(b.initResult);
+      this._souvenir?.memoriser({ init: b.initResult });
     } else {
       // Backend KO **ou trop lent** : on repond quand meme pour que la session VIVE (au moins
       // switch_profile / restart_profile). Le demarrage se poursuit en arriere-plan.
@@ -159,6 +169,19 @@ export class Router {
       this._refreshWhenReady(pending);
     }
     this._send({ jsonrpc: '2.0', id: msg.id, result });
+  }
+
+  // Reponse a `initialize` batie sur l'initResult du backend (vivant OU souvenir) — SITE UNIQUE de
+  // sa forme : deux copies divergeraient (un `listChanged` oublie d'un cote = notifs ignorees).
+  _resultatInit(initResult) {
+    const caps = structuredClone(initResult?.capabilities || {});
+    caps.tools = { ...(caps.tools || {}), listChanged: true }; // on garantit la propagation des updates
+    return {
+      protocolVersion: initResult?.protocolVersion || this.manager.clientInfo.protocolVersion,
+      capabilities: caps,
+      serverInfo: { name: 'pw-mcp-proxy', version: this.version, title: 'Playwright MCP multi-profil' },
+      ...(initResult?.instructions ? { instructions: initResult.instructions } : {}),
+    };
   }
 
   // Rattrapage d'une reponse degradee : quand le backend finit par etre pret, on force Claude a
@@ -182,6 +205,15 @@ export class Router {
   // backend, ET la doc officielle Claude Code precise qu'un timeout sur les requetes de decouverte
   // (tools/list...) n'est PAS retente. Une reponse lente serait donc perdue sans rattrapage.
   async _handleToolsList(msg) {
+    // SOUVENIR : la liste que le backend a deja rendue pour cette commande, TELLE QUELLE (passthrough
+    // intact) => aucun allumage. Retenue pour etre confrontee au vivant au premier vrai appel.
+    const memo = this._souvenir?.outils();
+    if (memo) {
+      const tools = memo;
+      const collisions = this._checkCollisions(tools);
+      tools.push(...this._ourTools(collisions));
+      return this._send({ jsonrpc: '2.0', id: msg.id, result: { tools } });
+    }
     // Sequence complete sous UNE seule echeance : demarrage du backend PUIS aspiration de ses tools
     // (deux attentes, un seul budget — c'est le temps total que le client mesure, pas les etapes).
     const pending = (async () => {
@@ -197,6 +229,7 @@ export class Router {
       return this._send({ jsonrpc: '2.0', id: msg.id, result: { tools: this._ourTools([]) } });
     }
     const tools = raced.value;
+    this._souvenir?.memoriser({ tools: structuredClone(tools) }); // AVANT d'y ajouter nos 3 tools maison
     const collisions = this._checkCollisions(tools);
     tools.push(...this._ourTools(collisions));
     this._send({ jsonrpc: '2.0', id: msg.id, result: { tools } });

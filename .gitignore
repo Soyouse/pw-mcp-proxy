@@ -21,3 +21,7 @@ spec/states/
 PLAN-CLOTURE.md
 # Sauvegarde locale ecrite par tools/basculer-v2.mjs (config utilisateur, jamais versionnee)
 profiles.*.bak.json
+
+# Souvenir de handshake (src/handshake-cache.js) : etat local regenere, jamais versionne
+handshake-cache.json
+handshake-cache.json.*.tmp

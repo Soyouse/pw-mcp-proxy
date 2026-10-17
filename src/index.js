@@ -11,6 +11,7 @@ import { log } from './logger.js';
 import { bootLogger } from './log-boot.js';
 import { Manager } from './manager.js';
 import { Router } from './router.js';
+import { ouvrirCache } from './handshake-cache.js';
 import { describeError, stackOf } from './error-detail.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -29,7 +30,11 @@ process.on('uncaughtException', (e) => log('uncaughtException: ' + describeError
 process.on('unhandledRejection', (e) => log('unhandledRejection: ' + describeError(e) + ' | ' + stackOf(e)));
 
 const manager = new Manager(configPath);
-const router = new Router(manager, process.stdout, pkg.version);
+// 🛑 SOUVENIR de handshake : sans lui, CHAQUE entree browser* de CHAQUE session allume un
+// @playwright/mcp a l'ouverture (mesure 17/10/2026 : 20 serveurs, ~6,5 Go, pour 11 Chrome utilises).
+// Ecrivain disque declare (un fichier borne, cf handshake-cache.js).
+const cache = ouvrirCache(process.env.PW_MCP_HANDSHAKE_CACHE || path.join(root, 'handshake-cache.json'));
+const router = new Router(manager, process.stdout, pkg.version, { cache });
 
 // MULTI-AGENT : PLUS de lock d'abdication ni de boot-sweep global (ils tueraient le serveur
 // partage qu'un AUTRE agent utilise). Il n'y a RIEN a amorcer ici : le DAEMON est lance a la

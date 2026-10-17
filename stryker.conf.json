@@ -23,7 +23,8 @@
     "src/janitor-pure.js",
     "src/identity-store-pure.js",
     "src/bind-host-pure.js",
-    "src/config-watch-pure.js"
+    "src/config-watch-pure.js",
+    "src/handshake-cache-pure.js"
   ],
   "reporters": [
     "clear-text",

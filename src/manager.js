@@ -411,6 +411,19 @@ export class Manager {
     return this.get(this.activeProfile);
   }
 
+  // Vrai des qu'un backend du profil actif existe (pret OU en cours de demarrage). Le routeur ne sert
+  // le SOUVENIR de handshake que si c'est faux : un backend vivant prime toujours sur un souvenir.
+  demarre() {
+    return this.backends.has(this.activeProfile);
+  }
+
+  // Spec du profil actif = la CLE du souvenir de handshake (cf handshake-cache-pure.cleHandshake).
+  // ⚠️ Passe par `_spec`, SOURCE UNIQUE de la commande : une cle calculee ailleurs pourrait servir le
+  // souvenir d'une AUTRE commande que celle qui sera lancee.
+  specActive() {
+    return this._spec(this.activeProfile);
+  }
+
   profileList() {
     return Object.entries(this.config.profiles).map(([name, p]) => ({ name, label: p.label || name }));
   }
